@@ -195,6 +195,7 @@ window.addEventListener('unload', cleanup);
 
 function startRecording() {
   document.addEventListener('click', handleClick, true);
+  document.addEventListener('contextmenu', handleRightClick, true);
   document.addEventListener('change', handleChange, true);
   document.addEventListener('input', handleInput, true);
   document.addEventListener('blur', handleBlur, true);
@@ -210,6 +211,7 @@ function startRecording() {
 
 function stopRecording() {
   document.removeEventListener('click', handleClick, true);
+  document.removeEventListener('contextmenu', handleRightClick, true);
   document.removeEventListener('change', handleChange, true);
   document.removeEventListener('input', handleInput, true);
   document.removeEventListener('blur', handleBlur, true);
@@ -243,18 +245,29 @@ function handleClick(e) {
       removeOverlay();
     }
   }, 500);
+
+  // Jika element adalah button type submit atau form submit, jangan record click
+  if (element.type === 'submit' || 
+      (element.tagName === 'BUTTON' && element.getAttribute('type') === 'submit')) {
+    return; // Submit event akan di-handle oleh handleSubmit
+  }
   
   if (element.tagName === 'A') {
     recordAction('click', element, {
       command: 'click',
-      value: '',
+      value: element.textContent.trim() || '',
       url: element.href
     });
   } else if (element.tagName === 'BUTTON' || 
-            (element.tagName === 'INPUT' && element.type === 'submit')) {
+            (element.tagName === 'INPUT' && ['button', 'submit', 'reset'].includes(element.type))) {
     recordAction('click', element, {
       command: 'click',
-      value: element.value || element.textContent
+      value: element.value || element.textContent.trim() || ''
+    });
+  } else if (element.tagName === 'INPUT' && ['checkbox', 'radio'].includes(element.type)) {
+    recordAction('click', element, {
+      command: 'click',
+      value: element.checked.toString()
     });
   }
 }
@@ -314,10 +327,21 @@ function handleBlur(e) {
 function handleSubmit(e) {
   if (!isRecording) return;
   
-  recordAction('submit', e.target, {
+  const form = e.target;
+  const submitButton = form.querySelector('button[type="submit"], input[type="submit"]');
+  
+  recordAction('submit', submitButton || form, {
     command: 'submit',
-    value: ''
+    value: submitButton ? (submitButton.value || submitButton.textContent.trim()) : ''
   });
+
+  // Tunggu sebentar untuk melihat apakah ada response message
+  setTimeout(() => {
+    const messages = document.querySelectorAll('[role="alert"], .alert, .message, .notification');
+    messages.forEach(msg => {
+      checkVisibilityAndContent(msg);
+    });
+  }, 1000);
 }
 
 function recordAction(type, element, data) {
@@ -360,66 +384,209 @@ function recordAction(type, element, data) {
 
 // Fungsi untuk mendapatkan selector terbaik
 function getBestSelector(element) {
-  // 1. ID (paling spesifik)
-  if (element.id) {
+  // 1. ID yang unik
+  if (element.id && document.querySelectorAll(`#${element.id}`).length === 1) {
     return {
       type: 'id',
       value: `id=${element.id}`
     };
   }
   
-  // 2. Name attribute
-  if (element.name) {
-    const sameNames = document.getElementsByName(element.name);
-    if (sameNames.length === 1) {
+  // 2. Data-testid atau data-cy (untuk testing attributes)
+  if (element.dataset) {
+    const testId = element.dataset.testid || element.dataset.cy;
+    if (testId) {
       return {
-        type: 'name',
-        value: `name=${element.name}`
+        type: 'css',
+        value: `css=[data-${testId.includes('testid') ? 'testid' : 'cy'}="${testId}"]`
       };
     }
   }
   
-  // 3. Link text untuk anchor
-  if (element.tagName === 'A' && element.textContent.trim()) {
-    const text = element.textContent.trim();
-    const sameTextLinks = Array.from(document.getElementsByTagName('A'))
-      .filter(a => a.textContent.trim() === text);
-    if (sameTextLinks.length === 1) {
+  // 3. Name attribute yang unik
+  if (element.name && document.getElementsByName(element.name).length === 1) {
       return {
-        type: 'linkText',
-        value: `linkText=${text}`
+      type: 'name',
+      value: `name=${element.name}`
       };
     }
-    // Jika ada multiple links dengan text yang sama, gunakan partial link text
-    return {
-      type: 'partialLinkText',
-      value: `partialLinkText=${text}`
-    };
-  }
-  
-  // 4. Label for attribute
-  const label = element.closest('label') || document.querySelector(`label[for="${element.id}"]`);
-  if (label && label.textContent.trim()) {
+
+  // 4. Label dengan for attribute
+  const labelFor = element.id && document.querySelector(`label[for="${element.id}"]`);
+  if (labelFor && labelFor.textContent.trim()) {
     return {
       type: 'label',
-      value: `label=${label.textContent.trim()}`
+      value: `label=${labelFor.textContent.trim()}`
     };
   }
-  
-  // 5. XPath yang spesifik
-  const xpath = getXPath(element);
-  if (xpath) {
+
+  // 5. Label sebagai parent
+  const parentLabel = element.closest('label');
+  if (parentLabel && parentLabel.textContent.trim()) {
     return {
-      type: 'xpath',
-      value: `xpath=${xpath}`
+      type: 'label',
+      value: `label=${parentLabel.textContent.trim()}`
     };
   }
+
+  // 6. Button/Link dengan exact text
+  if ((element.tagName === 'BUTTON' || element.tagName === 'A') && element.textContent.trim()) {
+    const text = element.textContent.trim();
+    const sameTextElements = Array.from(document.querySelectorAll(element.tagName))
+      .filter(el => el.textContent.trim() === text);
+    
+    if (sameTextElements.length === 1) {
+    return {
+        type: element.tagName === 'A' ? 'linkText' : 'text',
+        value: `${element.tagName === 'A' ? 'linkText' : 'text'}=${text}`
+    };
+    }
+  }
   
-  // 6. CSS Selector sebagai fallback
+  // 7. Input dengan placeholder yang unik
+  if (element.placeholder) {
+    const sameplaceholder = document.querySelectorAll(`[placeholder="${element.placeholder}"]`);
+    if (sameplaceholder.length === 1) {
   return {
     type: 'css',
-    value: `css=${getCssSelector(element)}`
+        value: `css=[placeholder="${element.placeholder}"]`
+      };
+    }
+  }
+
+  // 8. Kombinasi tag, class, dan atribut untuk CSS selector yang unik
+  const cssSelector = buildUniqueCssSelector(element);
+  if (cssSelector) {
+    return {
+      type: 'css',
+      value: `css=${cssSelector}`
+    };
+  }
+
+  // 9. XPath sebagai fallback, tapi yang lebih spesifik
+  return {
+    type: 'xpath',
+    value: `xpath=${getSpecificXPath(element)}`
   };
+}
+
+function buildUniqueCssSelector(element) {
+  let selector = element.tagName.toLowerCase();
+  let current = element;
+  let index = 1;
+
+  // Tambahkan class yang meaningful (hindari class yang dinamis/generated)
+  if (element.className) {
+    const classes = element.className.split(' ')
+      .filter(c => {
+        // Filter class yang kemungkinan besar stabil
+        return c && 
+               !c.match(/^[0-9]/) && // Hindari class yang dimulai dengan angka
+               !c.includes('__') &&   // Hindari class BEM modifier
+               !c.includes('--') &&   // Hindari class dengan format khusus
+               c.length > 2;          // Hindari class yang terlalu pendek
+      });
+    
+    if (classes.length > 0) {
+      selector += '.' + classes.join('.');
+    }
+  }
+
+  // Tambahkan atribut penting
+  ['type', 'role', 'name', 'title', 'aria-label'].forEach(attr => {
+    if (element.getAttribute(attr)) {
+      selector += `[${attr}="${element.getAttribute(attr)}"]`;
+    }
+  });
+
+  // Cek apakah selector sudah unik
+  if (document.querySelectorAll(selector).length === 1) {
+    return selector;
+  }
+
+  // Jika belum unik, tambahkan parent elements
+  while (current.parentElement && index <= 3) {
+    current = current.parentElement;
+    const parentTag = current.tagName.toLowerCase();
+    
+    // Skip body/html
+    if (['body', 'html'].includes(parentTag)) continue;
+
+    // Tambahkan parent tag dan class yang meaningful
+    let parentSelector = parentTag;
+    if (current.className) {
+      const parentClasses = current.className.split(' ')
+        .filter(c => c && !c.match(/^[0-9]/) && !c.includes('__') && !c.includes('--') && c.length > 2);
+      if (parentClasses.length > 0) {
+        parentSelector += '.' + parentClasses.join('.');
+      }
+    }
+
+    selector = `${parentSelector} > ${selector}`;
+    if (document.querySelectorAll(selector).length === 1) {
+      return selector;
+    }
+
+    index++;
+  }
+
+  return selector;
+}
+
+function getSpecificXPath(element) {
+  const parts = [];
+  let current = element;
+
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    let selector = current.tagName.toLowerCase();
+    
+    // Tambahkan ID jika ada
+    if (current.id) {
+      selector += `[@id="${current.id}"]`;
+      parts.unshift(selector);
+      break;
+    }
+
+    // Tambahkan atribut penting
+    const attributes = [];
+    ['name', 'class', 'role', 'type', 'aria-label'].forEach(attr => {
+      const value = current.getAttribute(attr);
+      if (value) {
+        attributes.push(`@${attr}="${value}"`);
+      }
+    });
+
+    if (attributes.length > 0) {
+      selector += `[${attributes.join(' and ')}]`;
+    }
+
+    // Tambahkan text content jika meaningful
+    const text = current.textContent?.trim();
+    if (text && text.length < 50) {
+      selector += `[contains(text(),"${text}")]`;
+    }
+
+    // Tambahkan index jika perlu
+    const siblings = current.parentNode ? Array.from(current.parentNode.children) : [];
+    const similarSiblings = siblings.filter(sibling => 
+      sibling.tagName === current.tagName
+    );
+
+    if (similarSiblings.length > 1) {
+      const index = similarSiblings.indexOf(current) + 1;
+      selector += `[${index}]`;
+    }
+
+    parts.unshift(selector);
+    current = current.parentNode;
+  }
+
+  return `//${parts.join('/')}`;
+}
+
+// Helper function untuk mendapatkan unique key untuk element
+function getUniqueElementKey(element) {
+  return element.id || element.name || getXPath(element);
 }
 
 function getXPath(element) {
@@ -460,11 +627,6 @@ function getXPath(element) {
   }
   
   return paths.join('');
-}
-
-// Helper function untuk mendapatkan unique key untuk element
-function getUniqueElementKey(element) {
-  return element.id || element.name || getXPath(element);
 }
 
 function getCssSelector(element) {
@@ -549,23 +711,217 @@ function startObserver() {
 
 // Fungsi untuk memeriksa visibility dan konten elemen
 function checkVisibilityAndContent(element) {
-  // Abaikan elemen control panel
-  if (element.closest('.recorder-controls')) return;
+  // Abaikan elemen control panel dan elemen yang tidak visible
+  if (element.closest('.recorder-controls') || !isElementVisible(element)) return;
 
-  // Cek apakah elemen visible
-  if (isElementVisible(element)) {
     const text = element.textContent?.trim();
-    if (text && (isErrorMessage(text) || isMessageElement(element))) {
-      // Langsung rekam sebagai assert visibility
+  if (!text) return;
+
+  // Cek apakah ini dialog/modal yang baru muncul
+  if (isDialog(element)) {
       recordAction('assert', element, {
         command: 'assertVisible',
         value: text,
-        isError: isErrorMessage(text),
-        visibilityType: 'content',
-        contentType: isErrorMessage(text) ? 'error' : 'message'
-      });
-    }
+      type: 'dialog'
+    });
+    return;
   }
+
+  // Cek pesan error/warning yang penting
+  if (isImportantMessage(element)) {
+    // Tunggu sebentar untuk memastikan pesan stabil
+    setTimeout(() => {
+      if (isElementVisible(element) && element.textContent?.trim() === text) {
+        recordAction('assert', element, {
+          command: 'assertVisible',
+          value: text,
+          type: isErrorMessage(text) ? 'error' : 
+                isWarningMessage(text) ? 'warning' : 'info'
+        });
+      }
+    }, 500);
+  }
+}
+
+// Fungsi untuk mengecek apakah elemen adalah dialog/modal
+function isDialog(element) {
+  // Cek role dialog/alertdialog
+  if (element.getAttribute('role') === 'dialog' || 
+      element.getAttribute('role') === 'alertdialog') {
+    return true;
+  }
+
+  // Cek class yang umum untuk modal/dialog
+  const dialogClasses = [
+    'modal', 'dialog', 'popup', 'overlay',
+    'lightbox', 'drawer', 'popover'
+  ];
+
+  const hasDialogClass = dialogClasses.some(className => {
+    const elementClasses = element.className.toLowerCase();
+    return elementClasses.includes(className) &&
+           !elementClasses.includes('wrapper') &&
+           !elementClasses.includes('container');
+  });
+
+  if (hasDialogClass) return true;
+
+  // Cek aria attributes
+  if (element.getAttribute('aria-modal') === 'true') return true;
+
+  return false;
+}
+
+// Fungsi untuk mengecek apakah ini pesan penting
+function isImportantMessage(element) {
+  // Cek role yang relevan
+  const importantRoles = [
+    'alert', 'status', 'alertdialog', 'log', 'banner',
+    'marquee', 'timer', 'tooltip', 'status', 'note'
+  ];
+  if (importantRoles.includes(element.getAttribute('role'))) {
+    return true;
+  }
+
+  // Cek class yang mengindikasikan pesan penting
+  const importantClasses = [
+    // Alert & Messages
+    'alert', 'error', 'warning', 'notification', 'toast',
+    'snackbar', 'message', 'info', 'notice', 'flash',
+    
+    // Bootstrap classes
+    'alert-danger', 'alert-warning', 'alert-info', 'alert-success',
+    'text-danger', 'text-warning', 'text-info', 'text-success',
+    'invalid-feedback', 'valid-feedback', 'form-text',
+    
+    // Material UI classes
+    'MuiAlert', 'MuiSnackbar', 'MuiTooltip',
+    
+    // Common framework classes
+    'ant-message', 'ant-notification', 'ant-alert',
+    'el-message', 'el-notification', 'el-alert',
+    'toast-error', 'toast-warning', 'toast-info', 'toast-success',
+    
+    // Common utility classes
+    'error-text', 'warning-text', 'info-text', 'success-text',
+    'error-message', 'warning-message', 'info-message', 'success-message',
+    'validation-message', 'help-text', 'hint-text', 'helper-text'
+  ];
+
+  const hasImportantClass = importantClasses.some(className => {
+    const elementClasses = element.className.toLowerCase();
+    return elementClasses.includes(className.toLowerCase()) &&
+           !elementClasses.includes('wrapper') &&
+           !elementClasses.includes('container');
+  });
+
+  // Cek tag dan atribut spesifik
+  const isImportantTag = [
+    'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'STRONG', 'EM', 'B', 'I', 'MARK',
+    'SMALL', 'DEL', 'INS', 'SUB', 'SUP'
+  ].includes(element.tagName);
+
+  // Cek aria attributes
+  const hasAriaAttr = [
+    'aria-label', 'aria-description', 'aria-details',
+    'aria-errormessage', 'aria-invalid', 'aria-required'
+  ].some(attr => element.hasAttribute(attr));
+
+  // Cek data attributes
+  const hasDataAttr = [
+    'data-error', 'data-test', 'data-warning', 'data-info', 'data-message',
+    'data-tooltip', 'data-hint', 'data-validation'
+  ].some(attr => element.hasAttribute(attr));
+
+  if (hasImportantClass || hasAriaAttr || hasDataAttr) {
+    return true;
+  }
+
+  // Cek parent elements (maksimal 3 level)
+  let parent = element.parentElement;
+  let level = 0;
+  while (parent && level < 3) {
+    if (importantRoles.includes(parent.getAttribute('role')) ||
+        importantClasses.some(c => parent.className.toLowerCase().includes(c.toLowerCase())) ||
+        hasImportantParentTag(parent)) {
+      return true;
+    }
+    parent = parent.parentElement;
+    level++;
+  }
+
+  // Jika ini heading dan mengandung keyword penting
+  if (isImportantTag && hasImportantText(element.textContent)) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasImportantParentTag(element) {
+  const importantTags = [
+    'ASIDE', 'ARTICLE', 'SECTION', 'NAV',
+    'HEADER', 'FOOTER', 'MAIN', 'DIALOG',
+    'DETAILS', 'SUMMARY', 'FIGURE', 'FIGCAPTION'
+  ];
+  return importantTags.includes(element.tagName);
+}
+
+function hasImportantText(text) {
+  if (!text) return false;
+  
+  const importantKeywords = [
+    // Error keywords
+    'error', 'invalid', 'failed', 'incorrect', 'wrong',
+    'gagal', 'salah', 'tidak valid', 'tidak benar',
+    'required', 'wajib', 'harus', 'tidak ditemukan',
+    'tidak tersedia', 'tidak sesuai', 'tidak boleh kosong',
+    'denied', 'rejected', 'unauthorized', 'forbidden',
+    
+    // Warning keywords
+    'warning', 'peringatan', 'caution', 'attention',
+    'perhatian', 'careful', 'hati-hati',
+    
+    // Info keywords
+    'important', 'penting', 'note', 'catatan',
+    'please', 'harap', 'mohon', 'silakan',
+    'must', 'should', 'need to', 'perlu',
+    
+    // Success keywords
+    'success', 'successful', 'succeeded', 'berhasil',
+    'saved', 'tersimpan', 'completed', 'selesai',
+    'updated', 'diperbarui', 'created', 'dibuat'
+  ];
+
+  return importantKeywords.some(keyword => 
+    text.toLowerCase().includes(keyword.toLowerCase())
+  );
+}
+
+// Fungsi untuk mengecek warning message
+function isWarningMessage(text) {
+  const warningKeywords = [
+    'warning', 'peringatan', 'caution', 'attention',
+    'perhatian', 'warning', 'careful', 'hati-hati'
+  ];
+  
+  return warningKeywords.some(keyword => 
+    text.toLowerCase().includes(keyword.toLowerCase())
+  );
+}
+
+// Fungsi untuk mengecek pesan info penting
+function isImportantInfoMessage(text) {
+  const infoKeywords = [
+    'important', 'penting', 'note', 'catatan',
+    'please', 'harap', 'mohon', 'silakan',
+    'must', 'harus', 'wajib'
+  ];
+  
+  return infoKeywords.some(keyword => 
+    text.toLowerCase().includes(keyword.toLowerCase())
+  );
 }
 
 // Fungsi untuk memeriksa apakah elemen visible
@@ -593,27 +949,62 @@ function isErrorMessage(text) {
   );
 }
 
-// Fungsi untuk memeriksa apakah elemen biasanya berisi pesan
+// Tambah fungsi untuk mengecek success message
+function isSuccessMessage(text) {
+  const successKeywords = [
+    'success', 'successful', 'succeeded', 'berhasil',
+    'saved', 'tersimpan', 'completed', 'selesai',
+    'updated', 'diperbarui', 'created', 'dibuat'
+  ];
+  
+  return successKeywords.some(keyword => 
+    text.toLowerCase().includes(keyword.toLowerCase())
+  );
+}
+
+// Update fungsi isMessageElement untuk lebih selektif
 function isMessageElement(element) {
+  // Cek apakah elemen memiliki role yang relevan
+  const messageRoles = ['alert', 'status', 'log'];
+  if (messageRoles.includes(element.getAttribute('role'))) {
+    return true;
+  }
+
+  // Cek class yang spesifik untuk pesan
   const messageClasses = [
-    'message', 'alert', 'notification', 'toast',
-    'error', 'success', 'warning', 'info',
-    'help-block', 'form-text', 'feedback',
-    'validation-message', 'help-text',
-    'error-text', 'success-text', 'hint-text'
+    'alert', 'message', 'notification', 'toast',
+    'error', 'success', 'warning', 'info'
   ];
 
-  const hasMessageClass = messageClasses.some(className => 
-    element.className.toLowerCase().includes(className.toLowerCase())
-  );
+  const hasMessageClass = messageClasses.some(className => {
+    const elementClasses = element.className.toLowerCase();
+    return elementClasses.includes(className.toLowerCase()) &&
+           !elementClasses.includes('wrapper') && // Hindari wrapper elements
+           !elementClasses.includes('container');
+  });
 
-  const messageRoles = ['alert', 'status', 'log', 'note', 'tooltip'];
-  const hasMessageRole = messageRoles.includes(element.getAttribute('role'));
+  if (hasMessageClass) {
+    return true;
+  }
 
-  const hasAriaLabel = element.hasAttribute('aria-label');
-  const hasAriaDescribedby = element.hasAttribute('aria-describedby');
+  // Cek aria attributes
+  if (element.hasAttribute('aria-live')) {
+    return true;
+  }
 
-  return hasMessageClass || hasMessageRole || hasAriaLabel || hasAriaDescribedby;
+  // Cek parent elements (maksimal 2 level)
+  let parent = element.parentElement;
+  let level = 0;
+  while (parent && level < 2) {
+    if (messageRoles.includes(parent.getAttribute('role')) ||
+        messageClasses.some(c => parent.className.toLowerCase().includes(c.toLowerCase()))) {
+      return true;
+    }
+    parent = parent.parentElement;
+    level++;
+  }
+
+  return false;
 }
 
 function handleHover(e) {
@@ -736,4 +1127,62 @@ function showMessageOverlay(element, options) {
   
   currentOverlay = overlay;
   currentTooltip = tooltip;
+}
+
+// Tambah handler untuk right click
+function handleRightClick(e) {
+  if (!isRecording) return;
+  
+  e.preventDefault(); // Prevent default context menu
+  const element = e.target;
+  
+  // Abaikan klik pada control panel dan overlay
+  if (element.closest('.recorder-controls') || 
+      element.classList.contains('recorder-hover-overlay') ||
+      element.classList.contains('recorder-tooltip')) return;
+
+  // Tampilkan menu assertion
+  showAssertionMenu(e.clientX, e.clientY, element);
+}
+
+// Fungsi untuk menampilkan menu assertion
+function showAssertionMenu(x, y, element) {
+  // Hapus menu yang mungkin sudah ada
+  removeAssertionMenu();
+  
+  const menu = document.createElement('div');
+  menu.className = 'recorder-assertion-menu';
+  menu.innerHTML = `
+    <div class="menu-item" data-type="error">Assert as Error Message</div>
+    <div class="menu-item" data-type="warning">Assert as Warning Message</div>
+    <div class="menu-item" data-type="info">Assert as Info Message</div>
+  `;
+  
+  // Posisikan menu
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  
+  // Event listeners untuk menu items
+  menu.addEventListener('click', (e) => {
+    const menuItem = e.target;
+    if (menuItem.classList.contains('menu-item')) {
+      const type = menuItem.dataset.type;
+      recordAction('assert', element, {
+        command: 'assertVisible',
+        value: element.textContent.trim(),
+        type: type
+      });
+      removeAssertionMenu();
+    }
+  });
+  
+  // Close menu when clicking outside
+  document.addEventListener('click', removeAssertionMenu, { once: true });
+  
+  document.body.appendChild(menu);
+}
+
+function removeAssertionMenu() {
+  const menu = document.querySelector('.recorder-assertion-menu');
+  if (menu) menu.remove();
 }

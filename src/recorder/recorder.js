@@ -1,10 +1,16 @@
 // Ambil URL dari parameter dan isi ke input
 document.addEventListener('DOMContentLoaded', () => {
+  // Ambil URL dari parameter dan isi ke input
   const urlParams = new URLSearchParams(window.location.search);
   const url = urlParams.get('url');
   if (url) {
     document.getElementById('urlInput').value = url;
   }
+
+  // Clear storage saat recorder.html dibuka
+  chrome.storage.local.clear(() => {
+    console.log('Storage dibersihkan');
+  });
 });
 
 document.getElementById("startRecord").addEventListener("click", async () => {
