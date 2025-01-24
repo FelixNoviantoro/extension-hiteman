@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>hiTeman Automation Recorder</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 20px auto;
+      padding: 20px;
+    }
+    .container {
+      text-align: center;
+    }
+    .input-group {
+      margin: 20px 0;
+      text-align: left;
+    }
+    .input-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    input[type="url"] {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border: 2px solid #ddd;
+      border-radius: 4px;
+      margin-bottom: 15px;
+    }
+    .button-group {
+      text-align: center;
+      margin-top: 20px;
+    }
+    button {
+      padding: 12px 25px;
+      font-size: 16px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    .instructions {
+      text-align: left;
+      margin-top: 30px;
+      padding: 20px;
+      background-color: #f8f9fa;
+      border-radius: 4px;
+    }
+    .note {
+      margin-top: 15px;
+      color: #666;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>hiTeman Automation Recorder</h1>
+    <div class="input-group">
+      <label for="urlInput">Target Website URL:</label>
+      <input type="url" id="urlInput" placeholder="https://example.com">
+      
+      <div class="button-group">
+        <button id="startRecord">Mulai Rekam</button>
+      </div>
+      <div class="note">
+        * Data rekaman akan tersimpan di Chrome Storage dan dapat diakses dari hiTeman Application.
+      </div>
+    </div>
+    <div class="instructions">
+      <h3>Cara Penggunaan:</h3>
+      <ol>
+        <li>Masukkan URL website yang ingin direkam</li>
+        <li>Klik "Mulai Rekam"</li>
+        <li>Website akan terbuka di tab baru dengan panel kontrol</li>
+        <li>Klik "Stop & Download" untuk menyimpan data</li>
+        <li>Data akan tersimpan di Chrome Storage</li>
+      </ol>
+    </div>
+    <!-- <div class="button-group">
+      <button id="checkStorage">Lihat Data Tersimpan</button>
+    </div> -->
+  </div>
+  <script src="recorder.js"></script>
+</body>
+</html> 

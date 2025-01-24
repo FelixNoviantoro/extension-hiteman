@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "hiTeman Automation Extention",
+  "version": "1.0",
+  "description": "Record web automation for generated data",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "downloads",
+    "storage",
+    "browsingData"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": ""
+  },
+  "background": {
+    "service_worker": "src/background/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "css": ["src/content/inject.css"],
+      "js": ["src/content/content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [{
+    "resources": [
+      "src/content/content.js",
+      "src/recorder/recorder.html",
+      "src/recorder/recorder.js",
+      "src/content/inject.css"
+    ],
+    "matches": ["<all_urls>"]
+  }],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; frame-src *;"
+  },
+  "externally_connectable": {
+    "matches": ["*://*/*"]
+  }
+}
