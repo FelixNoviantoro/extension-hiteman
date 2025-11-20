@@ -1,92 +1,445 @@
-<!DOCTYPE html>
 <html>
+
 <head>
-  <title>hiTeman Automation Recorder</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
+    ::-webkit-scrollbar {
+      display: none;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
     body {
-      font-family: Arial, sans-serif;
-      max-width: 800px;
-      margin: 20px auto;
-      padding: 20px;
+      font-family: 'Inter', sans-serif;
+      background: linear-gradient(135deg, #f8fafc 0%, #e0f2fe 100%);
+      height: 100vh;
     }
-    .container {
-      text-align: center;
+
+    #main-content {
+      height: 100vh;
+      display: flex;
     }
-    .input-group {
-      margin: 20px 0;
-      text-align: left;
+
+    #description-section {
+      display: none;
+      width: 60%;
+      background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+      position: relative;
+      overflow: hidden;
     }
-    .input-group label {
-      display: block;
-      margin-bottom: 5px;
-      font-weight: bold;
+
+    #description-section::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.2);
     }
-    input[type="url"] {
-      width: 100%;
-      padding: 12px;
-      font-size: 16px;
-      border: 2px solid #ddd;
-      border-radius: 4px;
-      margin-bottom: 15px;
-    }
-    .button-group {
-      text-align: center;
-      margin-top: 20px;
-    }
-    button {
-      padding: 12px 25px;
-      font-size: 16px;
-      background-color: #4CAF50;
+
+    .description-content {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 0 3rem;
       color: white;
+      height: 100%;
+    }
+
+    .logo-section {
+      display: flex;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .logo-icon {
+      width: 3rem;
+      height: 3rem;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 1rem;
+    }
+
+    .logo-icon::before {
+      content: '▶';
+      color: white;
+      font-size: 1.25rem;
+    }
+
+    .logo-text {
+      font-size: 1.875rem;
+      font-weight: 700;
+    }
+
+    .main-title {
+      font-size: 3rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      line-height: 1.1;
+    }
+
+    .main-description {
+      font-size: 1.25rem;
+      color: #bfdbfe;
+      margin-bottom: 2rem;
+      line-height: 1.6;
+    }
+
+    .features-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .feature-item {
+      display: flex;
+      align-items: center;
+    }
+
+    .feature-icon {
+      width: 2.5rem;
+      height: 2.5rem;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 1rem;
+    }
+
+    .feature-icon.shield::before {
+      content: '🛡️';
+    }
+
+    .feature-icon.bolt::before {
+      content: '⚡';
+    }
+
+    .feature-icon.video::before {
+      content: '📹';
+    }
+
+    .feature-title {
+      font-weight: 600;
+      font-size: 1.125rem;
+    }
+
+    .feature-desc {
+      color: #bfdbfe;
+    }
+
+    .decorative-circle {
+      position: absolute;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 50%;
+    }
+
+    .circle-1 {
+      width: 8rem;
+      height: 8rem;
+      top: 5rem;
+      right: 5rem;
+    }
+
+    .circle-2 {
+      width: 5rem;
+      height: 5rem;
+      bottom: 5rem;
+      right: 10rem;
+    }
+
+    .circle-3 {
+      width: 4rem;
+      height: 4rem;
+      top: 50%;
+      right: 2.5rem;
+    }
+
+    #recording-section {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    #recording-container {
+      width: 100%;
+      max-width: 28rem;
+    }
+
+    #recording-card {
+      background: white;
+      border-radius: 1rem;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+      border: 1px solid #f3f4f6;
+      padding: 2rem;
+    }
+
+    #recording-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .header-icon {
+      width: 4rem;
+      height: 4rem;
+      background: #2563eb;
+      border-radius: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 1rem;
+    }
+
+    .header-icon::before {
+      content: '▶';
+      color: white;
+      font-size: 1.5rem;
+    }
+
+    .header-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 0.5rem;
+    }
+
+    .header-subtitle {
+      color: #6b7280;
+    }
+
+    #recording-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    #url-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .url-label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: #374151;
+    }
+
+    .url-input-wrapper {
+      position: relative;
+    }
+
+    .url-icon {
+      position: absolute;
+      left: 0.75rem;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #9ca3af;
+      pointer-events: none;
+    }
+
+    .url-icon::before {
+      content: '🔗';
+    }
+
+    #urlInput {
+      display: block;
+      width: 100%;
+      padding: 0.75rem 0.75rem 0.75rem 2.5rem;
+      border: 1px solid #d1d5db;
+      border-radius: 0.5rem;
+      font-size: 1rem;
+      transition: all 0.2s;
+    }
+
+    #urlInput:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    #startRecord {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 0.75rem 1rem;
       border: none;
-      border-radius: 4px;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: white;
+      background: #2563eb;
       cursor: pointer;
+      transition: background-color 0.2s;
     }
-    button:hover {
-      background-color: #45a049;
+
+    #startRecord:hover {
+      background: #1d4ed8;
     }
-    .instructions {
-      text-align: left;
-      margin-top: 30px;
-      padding: 20px;
-      background-color: #f8f9fa;
-      border-radius: 4px;
+
+    .record-icon {
+      margin-right: 0.5rem;
     }
-    .note {
-      margin-top: 15px;
-      color: #666;
-      font-style: italic;
+
+    .record-icon::before {
+      content: '⏺️';
+    }
+
+    #features-simple {
+      display: flex;
+      justify-content: center;
+      gap: 1.5rem;
+      font-size: 0.75rem;
+      color: #6b7280;
+    }
+
+    .feature-simple {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    #recording-footer {
+      margin-top: 2rem;
+      text-align: center;
+    }
+
+    .footer-text {
+      font-size: 0.75rem;
+      color: #6b7280;
+    }
+
+    @media (min-width: 1024px) {
+      #description-section {
+        display: flex;
+      }
+
+      #recording-section {
+        width: 40%;
+      }
+    }
+
+    @media (min-width: 1280px) {
+      .description-content {
+        padding: 0 5rem;
+      }
+
+      .main-title {
+        font-size: 3.75rem;
+      }
     }
   </style>
-</head>
-<body>
-  <div class="container">
-    <h1>hiTeman Automation Recorder</h1>
-    <div class="input-group">
-      <label for="urlInput">Target Website URL:</label>
-      <input type="url" id="urlInput" placeholder="https://example.com">
-      
-      <div class="button-group">
-        <button id="startRecord">Mulai Rekam</button>
-      </div>
-      <div class="note">
-        * Data rekaman akan tersimpan di Chrome Storage dan dapat diakses dari hiTeman Application.
-      </div>
-    </div>
-    <div class="instructions">
-      <h3>Cara Penggunaan:</h3>
-      <ol>
-        <li>Masukkan URL website yang ingin direkam</li>
-        <li>Klik "Mulai Rekam"</li>
-        <li>Website akan terbuka di tab baru dengan panel kontrol</li>
-        <li>Klik "Stop & Download" untuk menyimpan data</li>
-        <li>Data akan tersimpan di Chrome Storage</li>
-      </ol>
-    </div>
-    <!-- <div class="button-group">
-      <button id="checkStorage">Lihat Data Tersimpan</button>
-    </div> -->
-  </div>
   <script src="recorder.js"></script>
+</head>
+
+<body>
+  <main id="main-content">
+    <!-- Left Section - Description -->
+    <div id="description-section">
+      <div class="description-content">
+        <div>
+          <div class="logo-section">
+            <div class="logo-icon"></div>
+            <h1 class="logo-text">hiTeman</h1>
+          </div>
+          <h2 class="main-title">
+            Record Any Website Instantly
+          </h2>
+          <p class="main-description">
+            Capture high-quality recordings of any website with just a URL. Perfect for tutorials, demos,
+            and documentation with professional results.
+          </p>
+        </div>
+        <div class="features-list">
+          <div class="feature-item">
+            <div class="feature-icon shield"></div>
+            <div>
+              <h3 class="feature-title">Secure Recording</h3>
+              <p class="feature-desc">Your data stays private with encrypted connections</p>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon bolt"></div>
+            <div>
+              <h3 class="feature-title">Lightning Fast</h3>
+              <p class="feature-desc">Start recording instantly with zero setup required</p>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon video"></div>
+            <div>
+              <h3 class="feature-title">HD Quality</h3>
+              <p class="feature-desc">Crystal clear recordings in high definition</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Decorative Elements -->
+      <div class="decorative-circle circle-1"></div>
+      <div class="decorative-circle circle-2"></div>
+      <div class="decorative-circle circle-3"></div>
+    </div>
+    <!-- Right Section - Recording Form -->
+    <div id="recording-section">
+      <div id="recording-container">
+        <div id="recording-card">
+          <div id="recording-header">
+            <div class="header-icon"></div>
+            <h1 class="header-title">Start Recording</h1>
+            <p class="header-subtitle">Enter a website URL to begin</p>
+          </div>
+          <form id="recording-form">
+            <div id="url-field">
+              <label for="website-url" class="url-label">
+                Website URL
+              </label>
+              <div class="url-input-wrapper">
+                <div class="url-icon"></div>
+                <input type="url" id="urlInput" name="website-url" placeholder="https://example.com">
+              </div>
+            </div>
+            <div id="recording-buttons">
+              <button type="submit" id="startRecord"
+                class="w-full bg-gradient-to-r from-primary to-secondary text-white py-3 rounded-xl font-semibold text-base hover:shadow-lg transform hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2">
+                <span>🎬</span> Start Recording
+              </button>
+            </div>
+            <div id="features-simple">
+              <div class="feature-simple">
+                <span>🛡️</span>
+                <span>Secure</span>
+              </div>
+              <div class="feature-simple">
+                <span>⚡</span>
+                <span>Instant</span>
+              </div>
+              <div class="feature-simple">
+                <span>📺</span>
+                <span>HD Quality</span>
+              </div>
+            </div>
+          </form>
+        </div>
+        <div id="recording-footer">
+          <p class="footer-text">
+            © 2024 hiTeman. Simple web recording.
+          </p>
+        </div>
+      </div>
+    </div>
+  </main>
 </body>
-</html> 
+
+</html>
