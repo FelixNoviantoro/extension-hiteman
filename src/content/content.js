@@ -42,11 +42,9 @@ function transformStepsForExport(rawSteps) {
       const nextUrl = next && next._metadata && next._metadata.pageUrl;
 
       if (next && curUrl && nextUrl && curUrl !== nextUrl) {
-        // Insert a waitForURL step so exported Playwright scripts wait for
-        // the app's URL to change (SPA-friendly). Also insert a selector
-        // wait and a visibility expectation when we have a stable selector
-        // on the next step.
-        out.push({ action: 'waitForURL', url: nextUrl, _metadata: { inserted: true, pageUrl: nextUrl } });
+        // Insert an explicit goto to ensure exported scripts navigate to the
+        // correct URL when the recorded page changes.
+        out.push({ action: 'goto', url: nextUrl, _metadata: { inserted: true, pageUrl: nextUrl } });
 
         if (next.selector) {
           out.push({ action: 'waitForSelector', selector: next.selector, _metadata: { inserted: true } });
@@ -464,18 +462,8 @@ function addControlPanel() {
         const prevCausedNav = prev && prev.action === 'click' && prev._metadata && prev._metadata.pageUrl && stepUrl && prev._metadata.pageUrl !== stepUrl;
 
         if (stepUrl && currentUrl && stepUrl !== currentUrl && !prevCausedNav && act !== 'goto' && act !== 'open') {
-          // Prefer waiting for the URL to reach a known pattern instead of forcing a goto.
-          const pattern = urlToPattern(stepUrl);
-          script += `  await page.waitForURL('${esc(pattern)}');\n`;
-          if (step.selector) {
-            script += `  await page.waitForSelector('${esc(step.selector)}');\n`;
-            script += `  await expect(page.locator('${esc(step.selector)}')).toBeVisible();\n`;
-          } else if (next && next.selector) {
-            script += `  await page.waitForSelector('${esc(next.selector)}');\n`;
-            script += `  await expect(page.locator('${esc(next.selector)}')).toBeVisible();\n`;
-          } else {
-            script += `  await page.waitForLoadState('networkidle');\n`;
-          }
+          // Navigation is handled explicitly by inserted `goto` steps in the
+          // transformed recording. Skip implicit waits here.
           currentUrl = stepUrl;
         }
       } catch (err) {
@@ -497,50 +485,9 @@ function addControlPanel() {
 
       // Click
       if (act === 'click' && step.selector) {
-        // If this click causes navigation (detected by pageUrl change in recording), use the
-        // Playwright navigation pattern to avoid races: await Promise.all([page.waitForNavigation(), page.click()])
-        try {
-          const curUrl = step._metadata && step._metadata.pageUrl;
-          const nextUrl = next && next._metadata && next._metadata.pageUrl;
-
-          if (next && curUrl && nextUrl && curUrl !== nextUrl) {
-            // Use waitForURL pattern to detect SPA route change caused by click
-            const pattern = urlToPattern(nextUrl);
-            script += `  await Promise.all([page.click('${esc(step.selector)}'), page.waitForURL('${esc(pattern)}')]);\n`;
-            if (next.selector) {
-              script += `  await page.waitForSelector('${esc(next.selector)}');\n`;
-              script += `  await expect(page.locator('${esc(next.selector)}')).toBeVisible();\n`;
-            }
-            currentUrl = nextUrl;
-            continue;
-          }
-
-          // Fallback: treat anchors as navigation triggers
-          const tag = step._metadata && step._metadata.elementInfo && step._metadata.elementInfo.tagName;
-          if (tag === 'A') {
-            // Anchor link: wait for URL change pattern rather than a navigation event
-            try {
-              if (next && next.selector) {
-                const pattern = urlToPattern(next._metadata && next._metadata.pageUrl ? next._metadata.pageUrl : nextUrl);
-                script += `  await Promise.all([page.click('${esc(step.selector)}'), page.waitForURL('${esc(pattern)}')]);\n`;
-                script += `  await page.waitForSelector('${esc(next.selector)}');\n`;
-                script += `  await expect(page.locator('${esc(next.selector)}')).toBeVisible();\n`;
-                currentUrl = next && next._metadata && next._metadata.pageUrl ? next._metadata.pageUrl : currentUrl;
-                continue;
-              }
-            } catch (err) {
-              // fallback to previous behaviour if pattern generation fails
-              script += `  await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle' }), page.click('${esc(step.selector)}')]);\n`;
-              if (next && next.selector) script += `  await page.waitForSelector('${esc(next.selector)}');\n`;
-              currentUrl = next && next._metadata && next._metadata.pageUrl ? next._metadata.pageUrl : currentUrl;
-              continue;
-            }
-          }
-        } catch (err) {
-          // ignore and fall back to simple click
-        }
-
-        // Generic click when no navigation detected
+        // Keep clicks simple. If the transform inserted a `goto` step for the
+        // next page, that will be emitted separately; avoid trying to guess
+        // navigation here.
         script += `  await page.click('${esc(step.selector)}');\n`;
         continue;
       }
@@ -558,19 +505,7 @@ function addControlPanel() {
       }
 
       // waitForURL (inserted by transform), expectVisible, or waitForSelector (assertVisible)
-      if (act === 'waitForURL') {
-        // Prefer explicit url field from the transformed step, but convert it
-        // into a Playwright pattern using urlToPattern so the emitted code
-        // uses '**/segment' style matching.
-        const pattern = step.url ? urlToPattern(step.url) : (step._metadata && step._metadata.pageUrl ? urlToPattern(step._metadata.pageUrl) : '');
-        script += `  await page.waitForURL('${esc(pattern)}');\n`;
-        // If a selector is attached to this synthetic step, wait for and assert visibility
-        if (step.selector) {
-          script += `  await page.waitForSelector('${esc(step.selector)}');\n`;
-          script += `  await expect(page.locator('${esc(step.selector)}')).toBeVisible();\n`;
-        }
-        continue;
-      }
+      // (obsolete) waitForTimeout steps are no longer emitted by the transform.
 
       if (act === 'expectVisible') {
         if (step.selector) {
@@ -814,7 +749,7 @@ function handleSubmit(e) {
     messages.forEach((msg) => {
       checkVisibilityAndContent(msg);
     });
-  }, 1000);
+  }, 3000);
 }
 
 function recordAction(type, element, data) {
@@ -1011,6 +946,7 @@ function buildPlaywrightCssSelector(element) {
 
   // Cek apakah selector sudah unik
   if (document.querySelectorAll(selector).length === 1) {
+    console.log('[Recorder] buildPlaywrightCssSelector: found unique selector:', selector);
     return selector;
   }
 
@@ -1019,6 +955,7 @@ function buildPlaywrightCssSelector(element) {
     const candidates = Array.from(document.querySelectorAll(selector));
     const index = candidates.indexOf(element);
     if (index > -1) {
+      console.log('[Recorder] buildPlaywrightCssSelector: trying nth-of-type for selector:', selector, 'at index:', index);
       const nthSelector = `${selector}:nth-of-type(${index + 1})`;
       if (document.querySelectorAll(nthSelector).length === 1) {
         return nthSelector;
@@ -1069,6 +1006,22 @@ function buildPlaywrightCssSelector(element) {
 
   // Jika masih tidak unik, coba naik level ancestor dan gunakan ancestor-scoped selector
   // Contoh: `table tbody tr:nth-of-type(3) button.btn`
+  // Special-case: if element is inside a table row, try a row-scoped selector
+  try {
+    const row = element.closest && element.closest('tr');
+    if (row && row.parentElement) {
+      const parentOfRow = row.parentElement;
+      const sameRows = Array.from(parentOfRow.children).filter(c => c.tagName === 'TR');
+      const rowIdx = sameRows.indexOf(row);
+      if (rowIdx > -1) {
+        const parentTag = parentOfRow.tagName.toLowerCase();
+        const candRow = `${parentTag} > tr:nth-of-type(${rowIdx + 1}) ${selector}`;
+        if (document.querySelectorAll(candRow).length === 1) return candRow;
+      }
+    }
+  } catch (err) {
+    // ignore row-scoped attempt
+  }
   try {
     let ancestor = element.parentElement;
     let depth = 0;
