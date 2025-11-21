@@ -913,169 +913,295 @@ function getBestPlaywrightSelector(element) {
 
 function buildPlaywrightCssSelector(element) {
   console.log('[Recorder] buildPlaywrightCssSelector called for element:', element);
-  // Coba selector sederhana terlebih dahulu
+  
+  if (!element || !element.tagName) {
+    console.warn('[Recorder] Invalid element provided');
+    return 'body'; // Fallback
+  }
+
+  // Strategy 1: Try ID first (most reliable)
+  if (element.id && !element.id.match(/^[0-9]/)) {
+    const idSelector = `#${CSS.escape(element.id)}`;
+    if (isSelectorUnique(idSelector)) {
+      console.log('[Recorder] Using ID selector:', idSelector);
+      return idSelector;
+    }
+  }
+
+  // Strategy 2: Try data-testid or other data attributes
+  const dataAttributes = ['data-testid', 'data-id', 'data-qa', 'data-cy', 'data-test'];
+  for (const attr of dataAttributes) {
+    if (element.hasAttribute(attr)) {
+      const value = element.getAttribute(attr);
+      if (value && value.trim()) {
+        const dataSelector = `[${attr}="${CSS.escape(value)}"]`;
+        if (isSelectorUnique(dataSelector)) {
+          console.log('[Recorder] Using data attribute selector:', dataSelector);
+          return dataSelector;
+        }
+      }
+    }
+  }
+
+  // Strategy 3: Build comprehensive selector with multiple attributes
   let selector = element.tagName.toLowerCase();
-
-  // Tambahkan type untuk input, button, dan select
-  // Hanya gunakan attribute `type` jika atribut tersebut secara eksplisit ada di DOM.
-  // Jangan andalkan `element.type` saja karena browser bisa memberikan default (mis. button -> "submit").
-  if (element.hasAttribute && element.hasAttribute('type') && ["INPUT", "BUTTON", "SELECT"].includes(element.tagName)) {
-    selector += `[type="${element.getAttribute('type')}"]`;
-  }
-
-  // Tambahkan class yang meaningful
-  if (element.className) {
-    let classStr = '';
-    if (typeof element.className === 'string') {
-      classStr = element.className;
-    } else if (typeof element.className.baseVal === 'string') {
-      // For SVG elements (SVGAnimatedString)
-      classStr = element.className.baseVal;
-    }
-    if (classStr) {
-      const classes = classStr
-        .split(" ")
-        .filter((c) => c && !c.match(/^[0-9]/) && c.length > 2)
-        .slice(0, 2); // Ambil maksimal 2 class
-
-      if (classes.length > 0) {
-        selector += "." + classes.join(".");
-      }
+  
+  // Add type attribute for form elements
+  if (element.hasAttribute('type') && ["INPUT", "BUTTON", "SELECT"].includes(element.tagName)) {
+    const typeValue = element.getAttribute('type');
+    if (typeValue) {
+      selector += `[type="${CSS.escape(typeValue)}"]`;
     }
   }
 
-  // Cek apakah selector sudah unik
-  if (document.querySelectorAll(selector).length === 1) {
-    console.log('[Recorder] buildPlaywrightCssSelector: found unique selector:', selector);
-    return selector;
-  }
-
-  // Jika tidak unik, coba tambahkan :nth-of-type berdasarkan posisi relatif elemen
-  try {
-    const candidates = Array.from(document.querySelectorAll(selector));
-    const index = candidates.indexOf(element);
-    if (index > -1) {
-      console.log('[Recorder] buildPlaywrightCssSelector: trying nth-of-type for selector:', selector, 'at index:', index);
-      const nthSelector = `${selector}:nth-of-type(${index + 1})`;
-      if (document.querySelectorAll(nthSelector).length === 1) {
-        return nthSelector;
-      }
-    }
-  } catch (err) {
-    // Jika querySelectorAll gagal karena selector invalid, lanjutkan ke parent-scoped strategy
-  }
-
-  // Jika masih belum unik, buat selector dengan parent context
-  let parent = element.parentElement;
-  if (parent) {
-    let parentSelector = parent.tagName.toLowerCase();
-    
-    // Tambahkan parent class jika ada
-    if (parent.className) {
-      const parentClass = parent.className
-        .split(" ")
-        .filter((c) => c && !c.match(/^[0-9]/) && c.length > 2)[0];
-      
-      if (parentClass) {
-        parentSelector += "." + parentClass;
-      }
-    }
-    
-    const combinedSelector = `${parentSelector} ${selector}`;
-    if (document.querySelectorAll(combinedSelector).length === 1) {
-      return combinedSelector;
-    }
-
-    // Jika masih tidak unik, coba tambahkan :nth-of-type pada elemen dalam konteks parent
-    try {
-      const actualParent = element.parentElement;
-      if (actualParent) {
-        const siblings = Array.from(actualParent.children).filter(c => c.tagName === element.tagName);
-        const idx = siblings.indexOf(element);
-        if (idx > -1) {
-          const parentScoped = `${parentSelector} > ${element.tagName.toLowerCase()}:nth-of-type(${idx + 1})`;
-          if (document.querySelectorAll(parentScoped).length === 1) {
-            return parentScoped;
-          }
-        }
-      }
-    } catch (err) {
-      // ignore and fallback
+  // Add name attribute if present
+  if (element.hasAttribute('name')) {
+    const nameValue = element.getAttribute('name');
+    if (nameValue) {
+      selector += `[name="${CSS.escape(nameValue)}"]`;
     }
   }
 
-  // Jika masih tidak unik, coba naik level ancestor dan gunakan ancestor-scoped selector
-  // Contoh: `table tbody tr:nth-of-type(3) button.btn`
-  // Special-case: if element is inside a table row, try a row-scoped selector
-  try {
-    const row = element.closest && element.closest('tr');
-    if (row && row.parentElement) {
-      const parentOfRow = row.parentElement;
-      const sameRows = Array.from(parentOfRow.children).filter(c => c.tagName === 'TR');
-      const rowIdx = sameRows.indexOf(row);
-      if (rowIdx > -1) {
-        const parentTag = parentOfRow.tagName.toLowerCase();
-        const candRow = `${parentTag} > tr:nth-of-type(${rowIdx + 1}) ${selector}`;
-        if (document.querySelectorAll(candRow).length === 1) return candRow;
-      }
+  // Add placeholder for input elements
+  if (element.hasAttribute('placeholder') && element.tagName === 'INPUT') {
+    const placeholderValue = element.getAttribute('placeholder');
+    if (placeholderValue) {
+      selector += `[placeholder="${CSS.escape(placeholderValue)}"]`;
     }
-  } catch (err) {
-    // ignore row-scoped attempt
-  }
-  try {
-    let ancestor = element.parentElement;
-    let depth = 0;
-    while (ancestor && depth < 6) {
-      const ancTag = ancestor.tagName.toLowerCase();
-
-      // Jika ancestor punya id yang unik, gunakan itu langsung
-      if (ancestor.id && document.querySelectorAll(`#${ancestor.id}`).length === 1) {
-        const ancSel = `#${ancestor.id}`;
-        const cand = `${ancSel} ${selector}`;
-        if (document.querySelectorAll(cand).length === 1) return cand;
-        // coba nth-of-type di dalam parent of ancestor
-        const parentOfAnc = ancestor.parentElement;
-        if (parentOfAnc) {
-          const sameTagSiblings = Array.from(parentOfAnc.children).filter(c => c.tagName === ancestor.tagName);
-          const ancIdx = sameTagSiblings.indexOf(ancestor);
-          if (ancIdx > -1) {
-            const ancNth = `${parentOfAnc.tagName.toLowerCase()} > ${ancTag}:nth-of-type(${ancIdx + 1})`;
-            const cand2 = `${ancNth} ${selector}`;
-            if (document.querySelectorAll(cand2).length === 1) return cand2;
-          }
-        }
-      }
-
-      // Build a simple ancestor selector (tag + one meaningful class)
-      let ancSelector = ancTag;
-      if (ancestor.className) {
-        const ancClass = ancestor.className.split(' ').filter(c => c && !c.match(/^[0-9]/) && c.length > 2)[0];
-        if (ancClass) ancSelector += `.${ancClass}`;
-      }
-
-      const cand = `${ancSelector} ${selector}`;
-      if (document.querySelectorAll(cand).length === 1) return cand;
-
-      // try ancestor nth-of-type
-      const parentOfAncestor = ancestor.parentElement;
-      if (parentOfAncestor) {
-        const siblings = Array.from(parentOfAncestor.children).filter(c => c.tagName === ancestor.tagName);
-        const ancIndex = siblings.indexOf(ancestor);
-        if (ancIndex > -1) {
-          const ancNth = `${ancSelector}:nth-of-type(${ancIndex + 1})`;
-          const cand2 = `${ancNth} ${selector}`;
-          if (document.querySelectorAll(cand2).length === 1) return cand2;
-        }
-      }
-
-      ancestor = ancestor.parentElement;
-      depth++;
-    }
-  } catch (err) {
-    // fallback to end
   }
 
+  // Add meaningful classes (more selective)
+  const meaningfulClasses = getMeaningfulClasses(element);
+  if (meaningfulClasses.length > 0) {
+    const classSelector = selector + '.' + meaningfulClasses.join('.');
+    if (isSelectorUnique(classSelector)) {
+      console.log('[Recorder] Using class-based selector:', classSelector);
+      return classSelector;
+    }
+  }
+
+  // Strategy 4: Text content for buttons and links
+  if (['BUTTON', 'A', 'SPAN', 'DIV'].includes(element.tagName)) {
+    const text = element.textContent?.trim();
+    if (text && text.length > 0 && text.length < 50) {
+      const textSelector = `${selector}:has-text("${CSS.escape(text)}")`;
+      if (isSelectorUnique(textSelector)) {
+        console.log('[Recorder] Using text-based selector:', textSelector);
+        return textSelector;
+      }
+    }
+  }
+
+  // Strategy 5: Parent context with precise indexing
+  const parentContextSelector = buildParentContextSelector(element);
+  if (parentContextSelector && isSelectorUnique(parentContextSelector)) {
+    console.log('[Recorder] Using parent context selector:', parentContextSelector);
+    return parentContextSelector;
+  }
+
+  // Strategy 6: Table-specific context (common in applications)
+  const tableContextSelector = buildTableContextSelector(element);
+  if (tableContextSelector && isSelectorUnique(tableContextSelector)) {
+    console.log('[Recorder] Using table context selector:', tableContextSelector);
+    return tableContextSelector;
+  }
+
+  // Strategy 7: Full path with precise indexing
+  const fullPathSelector = buildFullPathSelector(element);
+  if (fullPathSelector && isSelectorUnique(fullPathSelector)) {
+    console.log('[Recorder] Using full path selector:', fullPathSelector);
+    return fullPathSelector;
+  }
+
+  // Final fallback
+  console.warn('[Recorder] Using fallback selector');
   return selector;
+}
+
+// Helper function to check selector uniqueness
+function isSelectorUnique(selector) {
+  try {
+    return document.querySelectorAll(selector).length === 1;
+  } catch (error) {
+    console.warn('[Recorder] Invalid selector:', selector, error);
+    return false;
+  }
+}
+
+// Helper function to get meaningful classes
+function getMeaningfulClasses(element) {
+  let classStr = '';
+  
+  if (typeof element.className === 'string') {
+    classStr = element.className;
+  } else if (typeof element.className?.baseVal === 'string') {
+    classStr = element.className.baseVal; // SVG elements
+  }
+
+  if (!classStr) return [];
+
+  return classStr
+    .split(' ')
+    .filter(className => {
+      // Filter out meaningless classes
+      if (!className || className.length < 2) return false;
+      if (className.match(/^[0-9]/)) return false;
+      if (className.match(/^(js-|is-|has-)/)) return true; // Keep JS state classes
+      if (className.match(/(active|selected|disabled|hidden|visible)/)) return true; // Keep state classes
+      if (className.length > 3 && !className.match(/^[a-z]+-[0-9]/)) return true; // Keep meaningful names
+      return false;
+    })
+    .slice(0, 3); // Limit to 3 most meaningful classes
+}
+
+// Helper function to build parent context selector
+function buildParentContextSelector(element, maxDepth = 4) {
+  let currentElement = element;
+  let depth = 0;
+  let pathParts = [buildElementSelector(currentElement)];
+
+  while (currentElement.parentElement && depth < maxDepth) {
+    currentElement = currentElement.parentElement;
+    
+    // Stop if we reach body or html
+    if (currentElement.tagName === 'BODY' || currentElement.tagName === 'HTML') {
+      break;
+    }
+
+    const parentSelector = buildElementSelector(currentElement);
+    pathParts.unshift(parentSelector);
+    
+    // Check if current path is unique
+    const currentPath = pathParts.join(' > ');
+    if (isSelectorUnique(currentPath)) {
+      return currentPath;
+    }
+    
+    depth++;
+  }
+
+  return null;
+}
+
+// Helper function to build element selector with precise indexing
+function buildElementSelector(element) {
+  let selector = element.tagName.toLowerCase();
+  
+  // Add ID if available
+  if (element.id && !element.id.match(/^[0-9]/)) {
+    return `#${CSS.escape(element.id)}`;
+  }
+  
+  // Add meaningful classes
+  const meaningfulClasses = getMeaningfulClasses(element);
+  if (meaningfulClasses.length > 0) {
+    selector += '.' + meaningfulClasses.join('.');
+  }
+  
+  // Add precise nth-child if needed
+  if (element.parentElement) {
+    const siblings = Array.from(element.parentElement.children);
+    const sameTagSiblings = siblings.filter(sib => sib.tagName === element.tagName);
+    
+    if (sameTagSiblings.length > 1) {
+      const index = sameTagSiblings.indexOf(element);
+      if (index !== -1) {
+        // Try :nth-of-type first (more reliable)
+        const nthOfTypeSelector = `${selector}:nth-of-type(${index + 1})`;
+        if (isSelectorUnique(nthOfTypeSelector)) {
+          return nthOfTypeSelector;
+        }
+        
+        // Fallback to :nth-child
+        const allSiblingsIndex = siblings.indexOf(element);
+        if (allSiblingsIndex !== -1) {
+          return `${selector}:nth-child(${allSiblingsIndex + 1})`;
+        }
+      }
+    }
+  }
+  
+  return selector;
+}
+
+// Helper function for table contexts (very common in web apps)
+function buildTableContextSelector(element) {
+  const row = element.closest('tr');
+  if (!row) return null;
+
+  const table = row.closest('table');
+  if (!table) return null;
+
+  // Build table context
+  let tableSelector = 'table';
+  const tableClasses = getMeaningfulClasses(table);
+  if (tableClasses.length > 0) {
+    tableSelector += '.' + tableClasses.join('.');
+  }
+
+  // Find row position
+  const rows = Array.from(table.querySelectorAll('tr'));
+  const rowIndex = rows.indexOf(row);
+  if (rowIndex === -1) return null;
+
+  // Find cell position
+  const cells = Array.from(row.children);
+  const cellIndex = cells.indexOf(element);
+  if (cellIndex !== -1) {
+    return `${tableSelector} tr:nth-of-type(${rowIndex + 1}) > :nth-child(${cellIndex + 1})`;
+  }
+
+  // If element is inside a cell
+  const containingCell = element.closest('td, th');
+  if (containingCell) {
+    const cellIndex = cells.indexOf(containingCell);
+    if (cellIndex !== -1) {
+      const elementSelector = buildElementSelector(element);
+      return `${tableSelector} tr:nth-of-type(${rowIndex + 1}) > :nth-child(${cellIndex + 1}) ${elementSelector}`;
+    }
+  }
+
+  return null;
+}
+
+// Helper function to build full CSS path
+function buildFullPathSelector(element) {
+  const path = [];
+  let currentElement = element;
+  
+  while (currentElement && currentElement.tagName !== 'HTML') {
+    let selector = currentElement.tagName.toLowerCase();
+    
+    // Add ID if available
+    if (currentElement.id && !currentElement.id.match(/^[0-9]/)) {
+      selector = `#${CSS.escape(currentElement.id)}`;
+      path.unshift(selector);
+      break;
+    }
+    
+    // Add classes
+    const meaningfulClasses = getMeaningfulClasses(currentElement);
+    if (meaningfulClasses.length > 0) {
+      selector += '.' + meaningfulClasses.join('.');
+    }
+    
+    // Add nth-child for precision
+    if (currentElement.parentElement) {
+      const siblings = Array.from(currentElement.parentElement.children);
+      const index = siblings.indexOf(currentElement);
+      if (index !== -1 && siblings.length > 1) {
+        selector += `:nth-child(${index + 1})`;
+      }
+    }
+    
+    path.unshift(selector);
+    currentElement = currentElement.parentElement;
+    
+    // Stop if we have enough context
+    if (path.length >= 6) break;
+  }
+  
+  return path.join(' > ');
 }
 
 function getPlaywrightXPath(element) {
