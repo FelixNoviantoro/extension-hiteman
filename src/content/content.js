@@ -27,14 +27,24 @@ function urlToPattern(u) {
   }
 }
 
-// Helper: Sisipkan langkah wait ketika pageUrl berubah antar langkah
+// Helper: Sisipkan langkah wait ketika pageUrl berubah antar langkah DAN tambahkan evaluate fallback untuk semua action
 function transformStepsForExport(rawSteps) {
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return [];
 
   const out = [];
+  const actionsWithFallback = new Set(['click', 'fill', 'check', 'selectOption']);
+  
   for (let i = 0; i < rawSteps.length; i++) {
     const step = rawSteps[i];
+    
+    // Add the original step
     out.push(step);
+
+    // Add evaluate fallback for all relevant actions
+    if (actionsWithFallback.has(step.action) && step.selector) {
+      const fallbackStep = createEvaluateFallback(step);
+      out.push(fallbackStep);
+    }
 
     const next = rawSteps[i + 1];
     try {
@@ -42,15 +52,54 @@ function transformStepsForExport(rawSteps) {
       const nextUrl = next && next._metadata && next._metadata.pageUrl;
 
       if (next && curUrl && nextUrl && curUrl !== nextUrl) {
-        // Insert an explicit goto to ensure exported scripts navigate to the
-        // correct URL when the recorded page changes.
-        out.push({ action: 'goto', url: nextUrl, _metadata: { inserted: true, pageUrl: nextUrl } });
+        // Insert an explicit goto to ensure exported scripts navigate to the correct URL when the recorded page changes.
+        out.push({ 
+          action: 'goto', 
+          url: nextUrl, 
+          _metadata: { 
+            inserted: true, 
+            pageUrl: nextUrl 
+          } 
+        });
+        
+        out.push({ 
+          action: 'waitForLoadState', 
+          state: 'networkidle', 
+          _metadata: { 
+            inserted: true 
+          } 
+        });
 
         if (next.selector) {
-          out.push({ action: 'waitForSelector', selector: next.selector, _metadata: { inserted: true } });
-          out.push({ action: 'expectVisible', selector: next.selector, _metadata: { inserted: true } });
+          out.push({ 
+            action: 'waitForSelector', 
+            selector: next.selector, 
+            _metadata: { 
+              inserted: true 
+            } 
+          });
+          
+          out.push({ 
+            action: 'expectVisible', 
+            selector: next.selector, 
+            _metadata: { 
+              inserted: true 
+            } 
+          });
+          
+          // Also add evaluate fallback for the next step's selector after navigation
+          if (actionsWithFallback.has(next.action)) {
+            const navigationFallback = createEvaluateFallback(next);
+            out.push(navigationFallback);
+          }
         } else {
-          out.push({ action: 'waitForLoadState', state: 'networkidle', _metadata: { inserted: true } });
+          out.push({ 
+            action: 'waitForLoadState', 
+            state: 'networkidle', 
+            _metadata: { 
+              inserted: true 
+            } 
+          });
         }
       }
     } catch (err) {
@@ -59,6 +108,50 @@ function transformStepsForExport(rawSteps) {
   }
 
   return out;
+}
+
+// Helper: Buat evaluate fallback untuk berbagai jenis action (using value field)
+function createEvaluateFallback(step) {
+  const selector = step.selector;
+  let expression = '';
+  
+  switch (step.action) {
+    case 'click':
+      expression = `document.querySelector('${selector}')?.click();`;
+      break;
+      
+    case 'fill':
+      const escapedValue = (step.value || '').replace(/'/g, "\\'");
+      expression = `const el=document.querySelector('${selector}');if(el){el.value='${escapedValue}';el.dispatchEvent(new Event('input',{bubbles:true}));}`;
+      break;
+      
+    case 'check':
+      expression = `const el=document.querySelector('${selector}');if(el){el.checked=true;el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+      break;
+      
+    case 'selectOption':
+      const escapedOptionValue = (step.value || '').replace(/'/g, "\\'");
+      expression = `const el=document.querySelector('${selector}');if(el){el.value='${escapedOptionValue}';el.dispatchEvent(new Event('change',{bubbles:true}));}`;
+      break;
+      
+    default:
+      expression = `console.log('Fallback for ${step.action}');`;
+  }
+  
+  // Return evaluate step with expression stored in VALUE field
+  return {
+    action: 'evaluate',
+    selector: step.selector,
+    value: expression, // Store expression in the existing 'value' field
+    _metadata: {
+      ...step._metadata,
+      inserted: true,
+      isFallback: true,
+      originalAction: step.action,
+      originalSelector: step.selector,
+      purpose: 'fallback'
+    }
+  };
 }
 
 // Modifikasi bagian check recording state
@@ -137,7 +230,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendResponse({ status: "Restored" });
   }
-  
+
   // Don't return true unless we're actually doing async work
 });
 
@@ -346,10 +439,10 @@ function addControlPanel() {
   if (exitBtnEl) {
     try {
       exitBtnEl.addEventListener('pointerdown', (e) => {
-        try { console.log('[Recorder] exitBtn pointerdown', { target: e.target, time: Date.now() }); } catch(err){}
+        try { console.log('[Recorder] exitBtn pointerdown', { target: e.target, time: Date.now() }); } catch (err) { }
       }, true);
       exitBtnEl.addEventListener('mousedown', (e) => {
-        try { console.log('[Recorder] exitBtn mousedown', { target: e.target, time: Date.now() }); } catch(err){}
+        try { console.log('[Recorder] exitBtn mousedown', { target: e.target, time: Date.now() }); } catch (err) { }
       }, true);
       console.log('[Recorder] attached pointer/mousedown diagnostics to exitBtn');
     } catch (err) {
@@ -360,29 +453,29 @@ function addControlPanel() {
   // Event listener untuk tombol Download Script
   if (downloadScriptBtnEl) {
     downloadScriptBtnEl.addEventListener("click", async () => {
-    // Ambil data rekaman terbaru dari chrome.storage.local
-    chrome.storage.local.get(["recordedData"], (result) => {
-      const rawSteps = result.recordedData || recordedData || [];
-      const steps = transformStepsForExport(rawSteps);
-      try {
-        console.log('[Recorder] downloadScript: rawSteps length', rawSteps.length);
-        console.log('[Recorder] downloadScript: transformed steps pageUrls', steps.map(s => (s && s._metadata && s._metadata.pageUrl) || null));
-      } catch (err) {
-        console.warn('[Recorder] downloadScript: failed to log steps', err);
-      }
-      const script = generatePlaywrightScriptFromSteps(steps);
-      const blob = new Blob([script], { type: "text/javascript" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `playwright-script-${new Date().toISOString().replace(/[:.]/g, "-")}.js`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, 100);
-    });
+      // Ambil data rekaman terbaru dari chrome.storage.local
+      chrome.storage.local.get(["recordedData"], (result) => {
+        const rawSteps = result.recordedData || recordedData || [];
+        const steps = transformStepsForExport(rawSteps);
+        try {
+          console.log('[Recorder] downloadScript: rawSteps length', rawSteps.length);
+          console.log('[Recorder] downloadScript: transformed steps pageUrls', steps.map(s => (s && s._metadata && s._metadata.pageUrl) || null));
+        } catch (err) {
+          console.warn('[Recorder] downloadScript: failed to log steps', err);
+        }
+        const script = generatePlaywrightScriptFromSteps(steps);
+        const blob = new Blob([script], { type: "text/javascript" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `playwright-script-${new Date().toISOString().replace(/[:.]/g, "-")}.js`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 100);
+      });
     });
   }
 
@@ -415,6 +508,7 @@ function addControlPanel() {
     let script = `// Generated by hiTeman Chrome Extension\n`;
     script += `const { test, expect } = require('@playwright/test');\n\n`;
     script += `test('Recorded test', async ({ page }) => {\n`;
+    script += `  try {\n`;
 
     try {
       console.log('[Recorder] generatePlaywrightScriptFromSteps: steps length', (steps && steps.length) || 0);
@@ -425,27 +519,6 @@ function addControlPanel() {
 
     // Track current known page URL to detect implicit page changes.
     let currentUrl = (steps && steps.length > 0 && steps[0]._metadata && steps[0]._metadata.pageUrl) ? steps[0]._metadata.pageUrl : '';
-
-    // Helper: convert a recorded absolute URL into a simple pattern Playwright can wait for.
-    // Prefer the last path/fragment segment so patterns look like '**/retribusi'.
-    function urlToPattern(u) {
-      try {
-        const parsed = new URL(u);
-        let route = '';
-        if (parsed.hash && parsed.hash.length > 1) {
-          route = parsed.hash.slice(1); // remove leading '#'
-        } else {
-          route = parsed.pathname || '';
-        }
-        const parts = route.split('/').filter(Boolean);
-        if (parts.length > 0) {
-          return `**/${parts[parts.length - 1]}`;
-        }
-        return u;
-      } catch (err) {
-        return u;
-      }
-    }
 
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
@@ -473,11 +546,11 @@ function addControlPanel() {
       // Navigation / open explicit
       if (act === 'goto' || act === 'open') {
         const url = step.url || step.value || '';
-        script += `  await page.goto('${esc(url)}');\n`;
+        script += `    await page.goto('${esc(url)}');\n`;
         if (next && next.selector) {
-          script += `  await page.waitForSelector('${esc(next.selector)}');\n`;
+          script += `    await page.waitForSelector('${esc(next.selector)}');\n`;
         } else {
-          script += `  await page.waitForLoadState('networkidle');\n`;
+          script += `    await page.waitForLoadState('networkidle');\n`;
         }
         currentUrl = step._metadata && step._metadata.pageUrl ? step._metadata.pageUrl : currentUrl;
         continue;
@@ -485,37 +558,106 @@ function addControlPanel() {
 
       // Click
       if (act === 'click' && step.selector) {
-        // Keep clicks simple. If the transform inserted a `goto` step for the
-        // next page, that will be emitted separately; avoid trying to guess
-        // navigation here.
-        script += `  await page.click('${esc(step.selector)}');\n`;
+        // Always wait for selector before clicking to reduce timing issues.
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+        if (step.force) {
+          script += `    await page.click('${esc(step.selector)}', { force: true });\n`;
+        } else {
+          script += `    await page.click('${esc(step.selector)}');\n`;
+        }
         continue;
       }
 
       // Fill / type
       if ((act === 'fill' || act === 'type') && step.selector) {
-        script += `  await page.fill('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
+        // Always wait for selector and assert editable before filling.
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+        script += `    await expect(page.locator('${esc(step.selector)}')).toBeEditable();\n`;
+        script += `    await page.fill('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
         continue;
       }
 
       // Select option
       if ((act === 'selectOption') && step.selector) {
-        script += `  await page.selectOption('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
+        // Always wait for selector before selecting an option.
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+        script += `    await page.selectOption('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
         continue;
       }
 
-      // waitForURL (inserted by transform), expectVisible, or waitForSelector (assertVisible)
-      // (obsolete) waitForTimeout steps are no longer emitted by the transform.
+      // Check (for radio buttons/checkboxes)
+      if (act === 'check' && step.selector) {
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+        script += `    await page.check('${esc(step.selector)}');\n`;
+        continue;
+      }
 
-      if (act === 'expectVisible') {
-        if (step.selector) {
-          script += `  await expect(page.locator('${esc(step.selector)}')).toBeVisible();\n`;
+      // Wait for timeout
+      if (act === 'waitForTimeout' || act === 'waitFor') {
+        const timeout = step.timeout || step.value || 1000;
+        script += `    await page.waitForTimeout(${timeout});\n`;
+        continue;
+      }
+
+      // Wait for URL
+      if (act === 'waitForURL') {
+        if (step.url) {
+          script += `    await page.waitForURL('${esc(step.url)}');\n`;
+        } else {
+          script += `    await page.waitForURL('**');\n`;
         }
         continue;
       }
 
-      if ((act === 'waitForSelector' || act === 'assert' || act === 'assertVisible') && step.selector) {
-        script += `  await page.waitForSelector('${esc(step.selector)}');\n`;
+      // Wait for load state
+      if (act === 'waitForLoadState') {
+        script += `    await page.waitForLoadState('${step.state || 'networkidle'}');\n`;
+        continue;
+      }
+
+      // Evaluate JavaScript
+      if (act === 'evaluate' && step.expression) {
+        const escapedExpression = step.expression.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+        script += `    await page.evaluate(() => {\n`;
+        script += `      ${escapedExpression}\n`;
+        script += `    });\n`;
+        continue;
+      }
+
+      // Dispatch event
+      if (act === 'dispatchEvent' && step.selector) {
+        script += `    await page.dispatchEvent('${esc(step.selector)}', '${step.eventType || 'click'}');\n`;
+        continue;
+      }
+
+      // Expect visible
+      if (act === 'expectVisible' && step.selector) {
+        // Ensure element exists before asserting visibility
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+        script += `    await expect(page.locator('${esc(step.selector)}')).toBeVisible();\n`;
+        continue;
+      }
+
+      // Assert
+      if (act === 'assert' && step.selector) {
+        if (step.assertionType === "url") {
+          script += `    await expect(page).toHaveURL('${esc(step.expected)}');\n`;
+        } else if (step.assertionType === "urlContains") {
+          script += `    const currentUrl = await page.url();\n`;
+          script += `    expect(currentUrl).toContain('${esc(step.expected)}');\n`;
+        } else if (step.assertionType === "elementText") {
+          script += `    await expect(page.locator('${esc(step.selector)}')).toHaveText('${esc(step.expected)}');\n`;
+        } else if (step.assertionType === "elementExists" || step.assertionType === "elementVisible") {
+          script += `    await expect(page.locator('${esc(step.selector)}')).toBeVisible();\n`;
+        } else if (step.assertionType === "elementChecked") {
+          script += `    await expect(page.locator('${esc(step.selector)}')).toBeChecked();\n`;
+        }
+        continue;
+      }
+
+      // Wait for selector / assert visible
+      if ((act === 'waitForSelector' || act === 'assertVisible') && step.selector) {
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
         continue;
       }
 
@@ -523,9 +665,9 @@ function addControlPanel() {
       try {
         if (next && step._metadata && next._metadata && step._metadata.pageUrl && next._metadata.pageUrl && step._metadata.pageUrl !== next._metadata.pageUrl) {
           if (next.selector) {
-            script += `  await page.waitForSelector('${esc(next.selector)}');\n`;
+            script += `    await page.waitForSelector('${esc(next.selector)}');\n`;
           } else {
-            script += `  await page.waitForLoadState('networkidle');\n`;
+            script += `    await page.waitForLoadState('networkidle');\n`;
           }
           currentUrl = next._metadata.pageUrl;
         }
@@ -534,6 +676,10 @@ function addControlPanel() {
       }
     }
 
+    script += `  } catch (err) {\n`;
+    script += `    console.error('Test failed', err);\n`;
+    script += `    process.exit(1);\n`;
+    script += `  }\n`;
     script += `});\n`;
     return script;
   }
@@ -755,7 +901,7 @@ function handleSubmit(e) {
 function recordAction(type, element, data) {
   console.log('[Recorder] recordAction called:', { type, element, data });
   const selector = getBestPlaywrightSelector(element);
-  
+
   // Assertion format for custom assertion types
   if (type === "assert" && data.type && ["elementText", "elementVisible", "elementClass", "elementValue"].includes(data.type)) {
     recordedData.push(data);
@@ -825,7 +971,7 @@ function mapToPlaywrightAction(command, type) {
     'submit': 'click',
     'assertVisible': 'waitForSelector'
   };
-  
+
   return actionMap[command] || 'click';
 }
 
@@ -890,8 +1036,8 @@ function getBestPlaywrightSelector(element) {
     ).filter((el) => el.textContent.trim() === text);
 
     if (sameTextElements.length === 1) {
-      return element.tagName === "A" 
-        ? `text=${text}` 
+      return element.tagName === "A"
+        ? `text=${text}`
         : `button:has-text("${text}")`;
     }
   }
@@ -913,7 +1059,7 @@ function getBestPlaywrightSelector(element) {
 
 function buildPlaywrightCssSelector(element) {
   console.log('[Recorder] buildPlaywrightCssSelector called for element:', element);
-  
+
   if (!element || !element.tagName) {
     console.warn('[Recorder] Invalid element provided');
     return 'body'; // Fallback
@@ -945,7 +1091,7 @@ function buildPlaywrightCssSelector(element) {
 
   // Strategy 3: Build comprehensive selector with multiple attributes
   let selector = element.tagName.toLowerCase();
-  
+
   // Add type attribute for form elements
   if (element.hasAttribute('type') && ["INPUT", "BUTTON", "SELECT"].includes(element.tagName)) {
     const typeValue = element.getAttribute('type');
@@ -1031,7 +1177,7 @@ function isSelectorUnique(selector) {
 // Helper function to get meaningful classes
 function getMeaningfulClasses(element) {
   let classStr = '';
-  
+
   if (typeof element.className === 'string') {
     classStr = element.className;
   } else if (typeof element.className?.baseVal === 'string') {
@@ -1062,7 +1208,7 @@ function buildParentContextSelector(element, maxDepth = 4) {
 
   while (currentElement.parentElement && depth < maxDepth) {
     currentElement = currentElement.parentElement;
-    
+
     // Stop if we reach body or html
     if (currentElement.tagName === 'BODY' || currentElement.tagName === 'HTML') {
       break;
@@ -1070,13 +1216,13 @@ function buildParentContextSelector(element, maxDepth = 4) {
 
     const parentSelector = buildElementSelector(currentElement);
     pathParts.unshift(parentSelector);
-    
+
     // Check if current path is unique
     const currentPath = pathParts.join(' > ');
     if (isSelectorUnique(currentPath)) {
       return currentPath;
     }
-    
+
     depth++;
   }
 
@@ -1086,23 +1232,23 @@ function buildParentContextSelector(element, maxDepth = 4) {
 // Helper function to build element selector with precise indexing
 function buildElementSelector(element) {
   let selector = element.tagName.toLowerCase();
-  
+
   // Add ID if available
   if (element.id && !element.id.match(/^[0-9]/)) {
     return `#${CSS.escape(element.id)}`;
   }
-  
+
   // Add meaningful classes
   const meaningfulClasses = getMeaningfulClasses(element);
   if (meaningfulClasses.length > 0) {
     selector += '.' + meaningfulClasses.join('.');
   }
-  
+
   // Add precise nth-child if needed
   if (element.parentElement) {
     const siblings = Array.from(element.parentElement.children);
     const sameTagSiblings = siblings.filter(sib => sib.tagName === element.tagName);
-    
+
     if (sameTagSiblings.length > 1) {
       const index = sameTagSiblings.indexOf(element);
       if (index !== -1) {
@@ -1111,7 +1257,7 @@ function buildElementSelector(element) {
         if (isSelectorUnique(nthOfTypeSelector)) {
           return nthOfTypeSelector;
         }
-        
+
         // Fallback to :nth-child
         const allSiblingsIndex = siblings.indexOf(element);
         if (allSiblingsIndex !== -1) {
@@ -1120,7 +1266,7 @@ function buildElementSelector(element) {
       }
     }
   }
-  
+
   return selector;
 }
 
@@ -1168,23 +1314,23 @@ function buildTableContextSelector(element) {
 function buildFullPathSelector(element) {
   const path = [];
   let currentElement = element;
-  
+
   while (currentElement && currentElement.tagName !== 'HTML') {
     let selector = currentElement.tagName.toLowerCase();
-    
+
     // Add ID if available
     if (currentElement.id && !currentElement.id.match(/^[0-9]/)) {
       selector = `#${CSS.escape(currentElement.id)}`;
       path.unshift(selector);
       break;
     }
-    
+
     // Add classes
     const meaningfulClasses = getMeaningfulClasses(currentElement);
     if (meaningfulClasses.length > 0) {
       selector += '.' + meaningfulClasses.join('.');
     }
-    
+
     // Add nth-child for precision
     if (currentElement.parentElement) {
       const siblings = Array.from(currentElement.parentElement.children);
@@ -1193,14 +1339,14 @@ function buildFullPathSelector(element) {
         selector += `:nth-child(${index + 1})`;
       }
     }
-    
+
     path.unshift(selector);
     currentElement = currentElement.parentElement;
-    
+
     // Stop if we have enough context
     if (path.length >= 6) break;
   }
-  
+
   return path.join(' > ');
 }
 
@@ -1830,7 +1976,7 @@ function handleRightClick(e) {
 
 // Fungsi untuk menampilkan menu assertion
 function showAssertionMenu(x, y, element) {
-  console.log('[Recorder] showAssertionMenu called', {x, y, element});
+  console.log('[Recorder] showAssertionMenu called', { x, y, element });
   // Hapus menu yang mungkin sudah ada
   removeAssertionMenu();
 
