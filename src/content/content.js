@@ -27,79 +27,88 @@ function urlToPattern(u) {
   }
 }
 
-// Helper: Sisipkan langkah wait ketika pageUrl berubah antar langkah DAN tambahkan evaluate fallback untuk semua action
+// Helper: Sisipkan langkah wait ketika pageUrl berubah antar langkah 
+// DAN tambahkan wait setelah goto untuk memastikan elemen siap
 function transformStepsForExport(rawSteps) {
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return [];
 
   const out = [];
   const actionsWithFallback = new Set(['click', 'fill', 'check', 'selectOption']);
-  
+
   for (let i = 0; i < rawSteps.length; i++) {
     const step = rawSteps[i];
-    
+    const nextStep = rawSteps[i + 1];
+
     // Add the original step
     out.push(step);
 
-    // Add evaluate fallback for all relevant actions
-    if (actionsWithFallback.has(step.action) && step.selector) {
-      const fallbackStep = createEvaluateFallback(step);
-      out.push(fallbackStep);
+    // 🚨 KEY FIX: Auto-add waitForSelector after goto if next step needs an element
+    if (step.action === 'goto' && nextStep && nextStep.selector &&
+      ['click', 'fill', 'check', 'selectOption'].includes(nextStep.action)) {
+
+      console.log(`[Extension] Auto-inserting wait after goto: ${nextStep.selector}`);
+
+      // Short wait for framework initialization (Angular/React)
+      out.push({
+        action: 'waitForTimeout',
+        timeout: 500,
+        _metadata: {
+          inserted: true,
+          purpose: 'framework-initialization'
+        }
+      });
+
+      // Wait for the specific element
+      out.push({
+        action: 'waitForSelector',
+        selector: nextStep.selector,
+        _metadata: {
+          inserted: true,
+          purpose: 'auto-wait-after-navigation'
+        }
+      });
     }
 
-    const next = rawSteps[i + 1];
+    // 🚨 FIX: DON'T add evaluate fallback for every action immediately
+    // The execution engine should handle fallbacks conditionally
+
     try {
       const curUrl = step && step._metadata && step._metadata.pageUrl;
-      const nextUrl = next && next._metadata && next._metadata.pageUrl;
+      const nextUrl = nextStep && nextStep._metadata && nextStep._metadata.pageUrl;
 
-      if (next && curUrl && nextUrl && curUrl !== nextUrl) {
+      if (nextStep && curUrl && nextUrl && curUrl !== nextUrl) {
         // Insert an explicit goto to ensure exported scripts navigate to the correct URL when the recorded page changes.
-        out.push({ 
-          action: 'goto', 
-          url: nextUrl, 
-          _metadata: { 
-            inserted: true, 
-            pageUrl: nextUrl 
-          } 
-        });
-        
-        out.push({ 
-          action: 'waitForLoadState', 
-          state: 'networkidle', 
-          _metadata: { 
-            inserted: true 
-          } 
+        out.push({
+          action: 'goto',
+          url: nextUrl,
+          _metadata: {
+            inserted: true,
+            pageUrl: nextUrl
+          }
         });
 
-        if (next.selector) {
-          out.push({ 
-            action: 'waitForSelector', 
-            selector: next.selector, 
-            _metadata: { 
-              inserted: true 
-            } 
+        // navigation: do not insert automatic waitForLoadState; rely on selector-based waits or explicit navigation
+        if (nextStep.selector) {
+          out.push({
+            action: 'waitForSelector',
+            selector: nextStep.selector,
+            _metadata: {
+              inserted: true
+            }
           });
-          
-          out.push({ 
-            action: 'expectVisible', 
-            selector: next.selector, 
-            _metadata: { 
-              inserted: true 
-            } 
+
+          out.push({
+            action: 'expectVisible',
+            selector: nextStep.selector,
+            _metadata: {
+              inserted: true
+            }
           });
-          
-          // Also add evaluate fallback for the next step's selector after navigation
-          if (actionsWithFallback.has(next.action)) {
-            const navigationFallback = createEvaluateFallback(next);
-            out.push(navigationFallback);
-          }
+
+          // 🚨 FIX: DON'T add evaluate fallback here either
+          // The execution engine should handle fallbacks conditionally
         } else {
-          out.push({ 
-            action: 'waitForLoadState', 
-            state: 'networkidle', 
-            _metadata: { 
-              inserted: true 
-            } 
-          });
+          // no selector for next step — do not insert waitForLoadState automatically
         }
       }
     } catch (err) {
@@ -107,37 +116,80 @@ function transformStepsForExport(rawSteps) {
     }
   }
 
-  return out;
+  // Remove consecutive identical actions to avoid duplicate steps
+  const deduped = [];
+  for (let i = 0; i < out.length; i++) {
+    const cur = out[i];
+    const prev = deduped.length ? deduped[deduped.length - 1] : null;
+    if (!isSameAction(prev, cur)) {
+      deduped.push(cur);
+    } else {
+      // merge metadata if available to preserve additional flags
+      try {
+        if (prev && cur && cur._metadata) {
+          prev._metadata = Object.assign({}, prev._metadata || {}, cur._metadata || {});
+        }
+      } catch (err) {
+        // ignore merge errors
+      }
+    }
+  }
+
+  return deduped;
+}
+
+// Helper to compare two actions for identity (used to remove duplicates)
+function isSameAction(a, b) {
+  if (!a || !b) return false;
+  if (a.action !== b.action) return false;
+  // compare selector/url/value/state fields which commonly define the action
+  const aSel = a.selector || '';
+  const bSel = b.selector || '';
+  if (aSel !== bSel) return false;
+
+  const aVal = (a.value !== undefined) ? String(a.value) : '';
+  const bVal = (b.value !== undefined) ? String(b.value) : '';
+  if (aVal !== bVal) return false;
+
+  const aUrl = a.url || '';
+  const bUrl = b.url || '';
+  if (aUrl !== bUrl) return false;
+
+  const aState = a.state || '';
+  const bState = b.state || '';
+  if (aState !== bState) return false;
+
+  return true;
 }
 
 // Helper: Buat evaluate fallback untuk berbagai jenis action (using value field)
 function createEvaluateFallback(step) {
   const selector = step.selector;
   let expression = '';
-  
+
   switch (step.action) {
     case 'click':
       expression = `document.querySelector('${selector}')?.click();`;
       break;
-      
+
     case 'fill':
       const escapedValue = (step.value || '').replace(/'/g, "\\'");
       expression = `const el=document.querySelector('${selector}');if(el){el.value='${escapedValue}';el.dispatchEvent(new Event('input',{bubbles:true}));}`;
       break;
-      
+
     case 'check':
       expression = `const el=document.querySelector('${selector}');if(el){el.checked=true;el.dispatchEvent(new Event('change',{bubbles:true}));}`;
       break;
-      
+
     case 'selectOption':
       const escapedOptionValue = (step.value || '').replace(/'/g, "\\'");
       expression = `const el=document.querySelector('${selector}');if(el){el.value='${escapedOptionValue}';el.dispatchEvent(new Event('change',{bubbles:true}));}`;
       break;
-      
+
     default:
       expression = `console.log('Fallback for ${step.action}');`;
   }
-  
+
   // Return evaluate step with expression stored in VALUE field
   return {
     action: 'evaluate',
@@ -520,12 +572,19 @@ function addControlPanel() {
     // Track current known page URL to detect implicit page changes.
     let currentUrl = (steps && steps.length > 0 && steps[0]._metadata && steps[0]._metadata.pageUrl) ? steps[0]._metadata.pageUrl : '';
 
+    // 🚨 KEY FIX: Process steps with evaluate fallback detection
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      const next = steps[i + 1];
+      const nextStep = steps[i + 1];
       const act = step.action || step.command;
 
       const stepUrl = step._metadata && step._metadata.pageUrl;
+
+      // 🚨 KEY FIX: Skip evaluate steps that are processed as fallbacks
+      if (act === 'evaluate' && step._metadata && step._metadata.isFallback) {
+        console.log(`[Recorder] Skipping evaluate fallback step: ${step.selector}`);
+        continue;
+      }
 
       // If the recorded step's pageUrl changed compared to our currentUrl and
       // the navigation was NOT already caused by the previous step's click, then
@@ -547,34 +606,107 @@ function addControlPanel() {
       if (act === 'goto' || act === 'open') {
         const url = step.url || step.value || '';
         script += `    await page.goto('${esc(url)}');\n`;
-        if (next && next.selector) {
-          script += `    await page.waitForSelector('${esc(next.selector)}');\n`;
+        if (nextStep && nextStep.selector) {
+          script += `    await page.waitForSelector('${esc(nextStep.selector)}');\n`;
         } else {
-          script += `    await page.waitForLoadState('networkidle');\n`;
+          // no automatic waitForLoadState emitted here
         }
         currentUrl = step._metadata && step._metadata.pageUrl ? step._metadata.pageUrl : currentUrl;
         continue;
       }
 
-      // Click
+      // 🚨 KEY FIX: Handle click with conditional evaluate fallback
       if (act === 'click' && step.selector) {
-        // Always wait for selector before clicking to reduce timing issues.
-        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
-        if (step.force) {
-          script += `    await page.click('${esc(step.selector)}', { force: true });\n`;
+        // Check if next step is an evaluate fallback for this click
+        const hasEvaluateFallback = nextStep &&
+          nextStep.action === 'evaluate' &&
+          nextStep.selector === step.selector &&
+          nextStep._metadata &&
+          nextStep._metadata.isFallback;
+
+        if (hasEvaluateFallback) {
+          console.log(`[Recorder] Generating click with evaluate fallback: ${step.selector}`);
+
+          script += `    // Click with evaluate fallback\n`;
+          script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+          script += `    try {\n`;
+
+          if (step.force) {
+            script += `      await page.click('${esc(step.selector)}', { force: true });\n`;
+          } else {
+            script += `      await page.click('${esc(step.selector)}');\n`;
+          }
+
+          script += `    } catch (error) {\n`;
+          script += `      // Click failed, using evaluate fallback\n`;
+
+          // Generate evaluate fallback
+          const expression = nextStep.value || nextStep.expression || '';
+          if (expression) {
+            const escapedExpression = expression.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+            script += `      await page.evaluate(() => {\n`;
+            script += `        ${escapedExpression}\n`;
+            script += `      });\n`;
+          }
+
+          script += `    }\n`;
+
+          // Skip the evaluate step since we've handled it
+          i++;
+          continue;
         } else {
-          script += `    await page.click('${esc(step.selector)}');\n`;
+          // Normal click without evaluate fallback
+          script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+          if (step.force) {
+            script += `    await page.click('${esc(step.selector)}', { force: true });\n`;
+          } else {
+            script += `    await page.click('${esc(step.selector)}');\n`;
+          }
+          continue;
         }
-        continue;
       }
 
-      // Fill / type
+      // 🚨 KEY FIX: Handle fill with conditional evaluate fallback
       if ((act === 'fill' || act === 'type') && step.selector) {
-        // Always wait for selector and assert editable before filling.
-        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
-        script += `    await expect(page.locator('${esc(step.selector)}')).toBeEditable();\n`;
-        script += `    await page.fill('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
-        continue;
+        // Check if next step is an evaluate fallback for this fill
+        const hasEvaluateFallback = nextStep &&
+          nextStep.action === 'evaluate' &&
+          nextStep.selector === step.selector &&
+          nextStep._metadata &&
+          nextStep._metadata.isFallback;
+
+        if (hasEvaluateFallback) {
+          console.log(`[Recorder] Generating fill with evaluate fallback: ${step.selector}`);
+
+          script += `    // Fill with evaluate fallback\n`;
+          script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+          script += `    await expect(page.locator('${esc(step.selector)}')).toBeEditable();\n`;
+          script += `    try {\n`;
+          script += `      await page.fill('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
+          script += `    } catch (error) {\n`;
+          script += `      // Fill failed, using evaluate fallback\n`;
+
+          // Generate evaluate fallback
+          const expression = nextStep.value || nextStep.expression || '';
+          if (expression) {
+            const escapedExpression = expression.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+            script += `      await page.evaluate(() => {\n`;
+            script += `        ${escapedExpression}\n`;
+            script += `      });\n`;
+          }
+
+          script += `    }\n`;
+
+          // Skip the evaluate step since we've handled it
+          i++;
+          continue;
+        } else {
+          // Normal fill without evaluate fallback
+          script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+          script += `    await expect(page.locator('${esc(step.selector)}')).toBeEditable();\n`;
+          script += `    await page.fill('${esc(step.selector)}', '${esc(step.value || '')}');\n`;
+          continue;
+        }
       }
 
       // Select option
@@ -610,17 +742,17 @@ function addControlPanel() {
       }
 
       // Wait for load state
-      if (act === 'waitForLoadState') {
-        script += `    await page.waitForLoadState('${step.state || 'networkidle'}');\n`;
-        continue;
-      }
+      // intentionally skip any explicit waitForLoadState actions; prefer selector-based waits
 
-      // Evaluate JavaScript
+      // Evaluate JavaScript (standalone evaluate, not fallbacks)
       if (act === 'evaluate' && step.expression) {
-        const escapedExpression = step.expression.replace(/`/g, '\\`').replace(/\${/g, '\\${');
-        script += `    await page.evaluate(() => {\n`;
-        script += `      ${escapedExpression}\n`;
-        script += `    });\n`;
+        // Only process standalone evaluate steps (not fallbacks)
+        if (!step._metadata || !step._metadata.isFallback) {
+          const escapedExpression = step.expression.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+          script += `    await page.evaluate(() => {\n`;
+          script += `      ${escapedExpression}\n`;
+          script += `    });\n`;
+        }
         continue;
       }
 
@@ -663,13 +795,13 @@ function addControlPanel() {
 
       // Generic: if the next recorded step has a different pageUrl, insert a wait to let navigation complete
       try {
-        if (next && step._metadata && next._metadata && step._metadata.pageUrl && next._metadata.pageUrl && step._metadata.pageUrl !== next._metadata.pageUrl) {
-          if (next.selector) {
-            script += `    await page.waitForSelector('${esc(next.selector)}');\n`;
+        if (nextStep && step._metadata && nextStep._metadata && step._metadata.pageUrl && nextStep._metadata.pageUrl && step._metadata.pageUrl !== nextStep._metadata.pageUrl) {
+          if (nextStep.selector) {
+            script += `    await page.waitForSelector('${esc(nextStep.selector)}');\n`;
           } else {
-            script += `    await page.waitForLoadState('networkidle');\n`;
+            // no automatic waitForLoadState emitted here; prefer explicit selector or navigation steps
           }
-          currentUrl = next._metadata.pageUrl;
+          currentUrl = nextStep._metadata.pageUrl;
         }
       } catch (err) {
         // ignore
@@ -718,6 +850,7 @@ function startRecording() {
   document.addEventListener("contextmenu", handleRightClick, true);
   document.addEventListener("change", handleChange, true);
   document.addEventListener("input", handleInput, true);
+  document.addEventListener("keyup", handleInput, true);
   document.addEventListener("blur", handleBlur, true);
   document.addEventListener("submit", handleSubmit, true);
 
@@ -846,15 +979,33 @@ function handleInput(e) {
 
   const element = e.target;
 
-  if (element.tagName === "INPUT" || element.tagName === "TEXTAREA") {
-    // Simpan value ke buffer
-    inputBuffer[getUniqueElementKey(element)] = {
-      element: element,
+  // Only track inputs
+  if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") return;
+
+  const type = (element.type || "").toLowerCase();
+  const textLikeInputTypes = new Set([
+    "text", "search", "email", "password",
+    "tel", "url", "number"
+  ]);
+
+  // Only text-like inputs
+  if (element.tagName === "TEXTAREA" || textLikeInputTypes.has(type)) {
+    const key = getUniqueElementKey(element);
+
+    inputBuffer[key] = {
+      element,
       value: element.value,
       timestamp: new Date(),
     };
+
+    console.log("[Recorder] handleInput captured via", e.type, {
+      key,
+      valuePreview: String(element.value).slice(0, 100),
+    });
   }
 }
+
+
 
 // Tambahkan event untuk blur (ketika input selesai)
 function handleBlur(e) {
@@ -863,7 +1014,11 @@ function handleBlur(e) {
   const element = e.target;
   const bufferKey = getUniqueElementKey(element);
 
-  if (inputBuffer[bufferKey]) {
+  // Only emit fill actions for text-like inputs / textareas to avoid generating fills for radios/checkboxes
+  const tag = element.tagName;
+  const textLikeInputTypes = new Set(['text', 'search', 'email', 'password', 'tel', 'url', 'number']);
+
+  if (inputBuffer[bufferKey] && (tag === 'TEXTAREA' || (tag === 'INPUT' && textLikeInputTypes.has((element.type || '').toLowerCase())))) {
     recordAction("type", element, {
       command: "fill",
       value: element.value,
