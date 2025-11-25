@@ -5,6 +5,7 @@ let observer = null; // Untuk mutation observer
 let isTargetPage = false; // Flag untuk menandai halaman target
 let currentOverlay = null;
 let currentTooltip = null;
+let lastClickedElement = null;
 
 // Helper: convert a recorded absolute URL into a simple pattern Playwright can wait for.
 // Prefer the last path/fragment segment so patterns look like '**/retribusi'.
@@ -852,7 +853,7 @@ function startRecording() {
   document.addEventListener("input", handleInput, true);
   document.addEventListener("keyup", handleInput, true);
   document.addEventListener("blur", handleBlur, true);
-  document.addEventListener("submit", handleSubmit, true);
+  // document.addEventListener("submit", handleSubmit, true);
 
   // Mulai observasi perubahan DOM
   startObserver();
@@ -867,8 +868,9 @@ function stopRecording() {
   document.removeEventListener("contextmenu", handleRightClick, true);
   document.removeEventListener("change", handleChange, true);
   document.removeEventListener("input", handleInput, true);
+  document.removeEventListener("keyup", handleInput, true);
   document.removeEventListener("blur", handleBlur, true);
-  document.removeEventListener("submit", handleSubmit, true);
+  // document.removeEventListener("submit", handleSubmit, true);
   inputBuffer = {};
 
   // Hentikan observasi
@@ -1019,10 +1021,58 @@ function handleBlur(e) {
   const textLikeInputTypes = new Set(['text', 'search', 'email', 'password', 'tel', 'url', 'number']);
 
   if (inputBuffer[bufferKey] && (tag === 'TEXTAREA' || (tag === 'INPUT' && textLikeInputTypes.has((element.type || '').toLowerCase())))) {
-    recordAction("type", element, {
-      command: "fill",
+    // Attempt to reuse selector from the most recent click action on this element.
+    // This ensures fill selector matches click selector despite class changes during typing.
+    let selectorToUse = null;
+    try {
+      const lastAction = recordedData.length > 0 ? recordedData[recordedData.length - 1] : null;
+      if (lastAction && lastAction.action === 'click' && lastAction.selector) {
+        // Verify it targets the same element by checking if the selector matches this element
+        const matches = element.matches(lastAction.selector);
+        if (matches) {
+          selectorToUse = lastAction.selector;
+          try { console.log('[Recorder] handleBlur: reusing click selector', { selector: selectorToUse }); } catch (err) {}
+        }
+      }
+    } catch (err) {
+      // If selector reuse fails (e.g., :nth-child doesn't match after DOM change), fall through
+      try { console.warn('[Recorder] handleBlur: failed to reuse selector, will compute new one', err); } catch (e) {}
+    }
+
+    // If we couldn't reuse the click selector, compute a fresh one
+    if (!selectorToUse) {
+      selectorToUse = getBestPlaywrightSelector(element);
+      try { console.log('[Recorder] handleBlur: computed new selector', { selector: selectorToUse }); } catch (err) {}
+    }
+
+    // Manually construct action to use the reused selector
+    const selector = selectorToUse;
+    let action = {
+      action: 'fill',
+      selector: selector,
       value: element.value,
-    });
+    };
+
+    action._metadata = {
+      timestamp: new Date().toISOString(),
+      pageUrl: window.location.href,
+      originalCommand: 'fill',
+      elementInfo: {
+        tagName: element.tagName,
+        id: element.id,
+        className: element.className,
+        text: element.textContent?.trim()
+      }
+    };
+
+    recordedData.push(action);
+    try { console.log('[Recorder] fill recorded with selector:', { selector }); } catch (err) {}
+
+    if (isRecording) {
+      chrome.storage.local.set({ recordedData: recordedData }, () => {
+        try { console.log('[Recorder] chrome.storage.local.set done'); } catch (err) {}
+      });
+    }
 
     // Hapus dari buffer
     delete inputBuffer[bufferKey];
@@ -1136,29 +1186,41 @@ function shouldIncludeValue(command) {
   return commandsWithValue.includes(command);
 }
 
+// Helper: Strip Angular framework classes (ng-untouched, ng-pristine, ng-valid, ng-dirty, etc.) from selector
+function stripAngularClasses(selector) {
+  if (!selector || typeof selector !== 'string') return selector;
+  // Remove ng-* classes and -inserted artifacts from the selector string
+  let cleaned = selector.replace(/\.ng-\w+/g, '');  // Remove .ng-* classes
+  cleaned = cleaned.replace(/-inserted(?=\.|:|$)/g, '');  // Remove -inserted suffix (before . : or end)
+  // Also clean up any leftover empty classes (e.g., 'a.' -> 'a')
+  cleaned = cleaned.replace(/\.$/, '');  // Remove trailing dot
+  cleaned = cleaned.replace(/\.(?=\.)/g, '');  // Remove duplicate dots
+  return cleaned;
+}
+
 // Fungsi untuk mendapatkan selector terbaik untuk Playwright
 function getBestPlaywrightSelector(element) {
   // 1. Data-testid atau data-cy (prioritaskan ini)
   if (element.dataset) {
     const testId = element.dataset.testid || element.dataset.cy;
     if (testId) {
-      return `[data-testid="${testId}"]`;
+      return stripAngularClasses(`[data-testid="${testId}"]`);
     }
   }
 
   // 2. ID yang unik
   if (element.id && document.querySelectorAll(`#${element.id}`).length === 1) {
-    return `#${element.id}`;
+    return stripAngularClasses(`#${element.id}`);
   }
 
   // 3. Untuk input elements, prioritaskan aria-label
   if (element.tagName === "INPUT" && element.getAttribute("aria-label")) {
-    return `input[aria-label="${element.getAttribute("aria-label")}"]`;
+    return stripAngularClasses(`input[aria-label="${element.getAttribute("aria-label")}"]`);
   }
 
   // 4. Name attribute yang unik
   if (element.name && document.getElementsByName(element.name).length === 1) {
-    return `[name="${element.name}"]`;
+    return stripAngularClasses(`[name="${element.name}"]`);
   }
 
   // 5. Placeholder yang unik untuk input
@@ -1167,7 +1229,7 @@ function getBestPlaywrightSelector(element) {
       `[placeholder="${element.placeholder}"]`
     );
     if (samePlaceholder.length === 1) {
-      return `[placeholder="${element.placeholder}"]`;
+      return stripAngularClasses(`[placeholder="${element.placeholder}"]`);
     }
   }
 
@@ -1176,7 +1238,7 @@ function getBestPlaywrightSelector(element) {
     const role = element.getAttribute("role");
     const sameRole = document.querySelectorAll(`[role="${role}"]`);
     if (sameRole.length === 1) {
-      return `[role="${role}"]`;
+      return stripAngularClasses(`[role="${role}"]`);
     }
   }
 
@@ -1191,25 +1253,25 @@ function getBestPlaywrightSelector(element) {
     ).filter((el) => el.textContent.trim() === text);
 
     if (sameTextElements.length === 1) {
-      return element.tagName === "A"
+      return stripAngularClasses(element.tagName === "A"
         ? `text=${text}`
-        : `button:has-text("${text}")`;
+        : `button:has-text("${text}")`);
     }
   }
 
   // 8. Untuk image elements
   if (element.tagName === "IMG" && element.alt) {
-    return `img[alt="${element.alt}"]`;
+    return stripAngularClasses(`img[alt="${element.alt}"]`);
   }
 
   // 9. CSS selector yang unik
   const cssSelector = buildPlaywrightCssSelector(element);
   if (cssSelector) {
-    return cssSelector;
+    return stripAngularClasses(cssSelector);
   }
 
   // 10. XPath sebagai fallback
-  return getPlaywrightXPath(element);
+  return stripAngularClasses(getPlaywrightXPath(element));
 }
 
 function buildPlaywrightCssSelector(element) {
@@ -1225,7 +1287,7 @@ function buildPlaywrightCssSelector(element) {
     const idSelector = `#${CSS.escape(element.id)}`;
     if (isSelectorUnique(idSelector)) {
       console.log('[Recorder] Using ID selector:', idSelector);
-      return idSelector;
+      return stripAngularClasses(idSelector);
     }
   }
 
@@ -1238,7 +1300,7 @@ function buildPlaywrightCssSelector(element) {
         const dataSelector = `[${attr}="${CSS.escape(value)}"]`;
         if (isSelectorUnique(dataSelector)) {
           console.log('[Recorder] Using data attribute selector:', dataSelector);
-          return dataSelector;
+          return stripAngularClasses(dataSelector);
         }
       }
     }
@@ -1277,7 +1339,7 @@ function buildPlaywrightCssSelector(element) {
     const classSelector = selector + '.' + meaningfulClasses.join('.');
     if (isSelectorUnique(classSelector)) {
       console.log('[Recorder] Using class-based selector:', classSelector);
-      return classSelector;
+      return stripAngularClasses(classSelector);
     }
   }
 
@@ -1288,7 +1350,7 @@ function buildPlaywrightCssSelector(element) {
       const textSelector = `${selector}:has-text("${CSS.escape(text)}")`;
       if (isSelectorUnique(textSelector)) {
         console.log('[Recorder] Using text-based selector:', textSelector);
-        return textSelector;
+        return stripAngularClasses(textSelector);
       }
     }
   }
@@ -1297,26 +1359,37 @@ function buildPlaywrightCssSelector(element) {
   const parentContextSelector = buildParentContextSelector(element);
   if (parentContextSelector && isSelectorUnique(parentContextSelector)) {
     console.log('[Recorder] Using parent context selector:', parentContextSelector);
-    return parentContextSelector;
+    return stripAngularClasses(parentContextSelector);
   }
 
   // Strategy 6: Table-specific context (common in applications)
   const tableContextSelector = buildTableContextSelector(element);
   if (tableContextSelector && isSelectorUnique(tableContextSelector)) {
     console.log('[Recorder] Using table context selector:', tableContextSelector);
-    return tableContextSelector;
+    return stripAngularClasses(tableContextSelector);
   }
 
   // Strategy 7: Full path with precise indexing
   const fullPathSelector = buildFullPathSelector(element);
   if (fullPathSelector && isSelectorUnique(fullPathSelector)) {
     console.log('[Recorder] Using full path selector:', fullPathSelector);
-    return fullPathSelector;
+    return stripAngularClasses(fullPathSelector);
   }
 
   // Final fallback
   console.warn('[Recorder] Using fallback selector');
-  return selector;
+  // Build a full DOM path as a precise fallback (includes parent IDs, classes, and nth-child)
+  try {
+    const fullPath = buildFullPathSelector(element);
+    if (fullPath) {
+      console.log('[Recorder] Using full-path fallback selector:', fullPath);
+      return stripAngularClasses(fullPath);
+    }
+  } catch (err) {
+    console.warn('[Recorder] buildFullPathSelector failed, falling back to simple selector', err);
+  }
+
+  return stripAngularClasses(selector);
 }
 
 // Helper function to check selector uniqueness
@@ -1347,9 +1420,19 @@ function getMeaningfulClasses(element) {
       // Filter out meaningless classes
       if (!className || className.length < 2) return false;
       if (className.match(/^[0-9]/)) return false;
-      if (className.match(/^(js-|is-|has-)/)) return true; // Keep JS state classes
-      if (className.match(/(active|selected|disabled|hidden|visible)/)) return true; // Keep state classes
-      if (className.length > 3 && !className.match(/^[a-z]+-[0-9]/)) return true; // Keep meaningful names
+      
+      // Exclude Angular/framework classes
+      if (className.match(/^ng-/)) return false;  // ng-* prefix
+      if (className.match(/-inserted$/)) return false;  // -inserted suffix
+      if (className.match(/^_ng/)) return false;  // _ng* prefix
+      
+      // Exclude state/theme classes (these change during interaction)
+      if (className.match(/^(active|inactive|selected|disabled|enabled|hidden|visible|focus|hover|visited)$/)) return false;
+      if (className.match(/^(nav-|btn-|text-|alert-|toast-)/)) return false;  // Theme/utility classes
+      
+      // Keep only structural/semantic classes
+      if (className.match(/^(js-|is-|has-)/)) return true;  // Keep JS state classes
+      if (className.length > 3 && !className.match(/^[a-z]+-[0-9]/)) return true;  // Keep meaningful names
       return false;
     })
     .slice(0, 3); // Limit to 3 most meaningful classes
@@ -1426,43 +1509,65 @@ function buildElementSelector(element) {
 }
 
 // Helper function for table contexts (very common in web apps)
+// NOTE: This assumes you have access to a function named buildElementSelector(element)
+// which should create a simplified selector for the target element (e.g., 'i.icon-hamburger')
+
 function buildTableContextSelector(element) {
   const row = element.closest('tr');
   if (!row) return null;
 
-  const table = row.closest('table');
-  if (!table) return null;
+  // --- 1. Identify Unique Row Text ---
+  let uniqueRowText = '';
+  const cells = Array.from(row.querySelectorAll('td, th'));
 
-  // Build table context
-  let tableSelector = 'table';
-  const tableClasses = getMeaningfulClasses(table);
-  if (tableClasses.length > 0) {
-    tableSelector += '.' + tableClasses.join('.');
-  }
-
-  // Find row position
-  const rows = Array.from(table.querySelectorAll('tr'));
-  const rowIndex = rows.indexOf(row);
-  if (rowIndex === -1) return null;
-
-  // Find cell position
-  const cells = Array.from(row.children);
-  const cellIndex = cells.indexOf(element);
-  if (cellIndex !== -1) {
-    return `${tableSelector} tr:nth-of-type(${rowIndex + 1}) > :nth-child(${cellIndex + 1})`;
-  }
-
-  // If element is inside a cell
-  const containingCell = element.closest('td, th');
-  if (containingCell) {
-    const cellIndex = cells.indexOf(containingCell);
-    if (cellIndex !== -1) {
-      const elementSelector = buildElementSelector(element);
-      return `${tableSelector} tr:nth-of-type(${rowIndex + 1}) > :nth-child(${cellIndex + 1}) ${elementSelector}`;
+  // Look for unique text in cells that is descriptive (not just numbers or symbols)
+  for (const cell of cells) {
+    const text = cell.textContent?.trim();
+    // Criteria: Text exists, is long enough, and doesn't look like just a number/currency.
+    if (text && text.length > 5 && !/^[0-9.,\sR]+$/.test(text)) {
+      // For stability, use the first good descriptive text found
+      uniqueRowText = text;
+      break;
     }
   }
 
-  return null;
+  // If no unique text is found, we can't build a stable text-based row selector
+  if (!uniqueRowText) {
+    // Fallback: If no text, return null and let the general full-path logic take over, 
+    // OR optionally, keep your old positional logic here as a last resort fallback.
+    // For now, we prefer a stable selector, so we return null.
+    return null;
+  }
+
+  // --- 2. Build Root Selector (The Row) ---
+  // Use Playwright's :has-text() selector for guaranteed stability
+  const rowRootSelector = `tr:has-text("${CSS.escape(uniqueRowText)}")`;
+
+  // --- 3. Build Path from Row Down to Element ---
+  let pathSegment = '';
+  let current = element;
+
+  // Traverse UP from the element until the row is reached
+  while (current && current !== row) {
+    const tagName = current.tagName.toLowerCase();
+
+    // Build the selector for the current element: Tag + Meaningful Classes
+    let currentSelector = tagName;
+    const meaningfulClasses = getMeaningfulClasses(current);
+    if (meaningfulClasses.length > 0) {
+      currentSelector += '.' + meaningfulClasses.join('.');
+    }
+
+    // Prepend the segment to the path (e.g., 'td > button > i')
+    pathSegment = currentSelector + (pathSegment ? ' > ' + pathSegment : '');
+
+    current = current.parentElement;
+  }
+
+  // --- 4. Final Selector Assembly ---
+  // Combine the stable row root with the simplified path to the target element.
+  // Use ' ' (descendant selector) instead of ' > ' for more robustness.
+  return `${rowRootSelector} ${pathSegment}`;
 }
 
 // Helper function to build full CSS path
@@ -1604,6 +1709,113 @@ function getXPath(element) {
 
   return paths.join("");
 }
+
+// Exposed helper: Fix weak selectors in a recording JSON by resolving elements in the current page
+// Usage (in page console where the extension runs on the same app page):
+//   const fixed = window.__hiteman_fixSelectors(myRecordingJson);
+//   // fixed is the modified JSON (same structure) with improved selectors where resolvable
+window.__hiteman_fixSelectors = function(recording) {
+  try {
+    if (!recording) return recording;
+
+    // Accept either array of actions or object with 'steps' or 'actions'
+    const cloned = JSON.parse(JSON.stringify(recording));
+    const list = Array.isArray(cloned) ? cloned : (cloned.steps || cloned.actions || []);
+
+    function findElementByOuterHTML(outerHTML) {
+      if (!outerHTML) return null;
+      const all = document.querySelectorAll('*');
+      for (const el of all) {
+        if (el.outerHTML && el.outerHTML.indexOf(outerHTML.trim().slice(0, 60)) !== -1) {
+          return el;
+        }
+      }
+      return null;
+    }
+
+    for (const action of list) {
+      try {
+        if (!action || !action.selector) continue;
+
+        const selector = action.selector;
+
+        // Heuristic: treat selectors like 'button[type="button"]' or simple tag selectors as weak
+        const weakSelectorPattern = /^\w+(\[.*\])?$|^\w+\.[\w\-]+$/;
+        const isWeak = weakSelectorPattern.test(selector) || (document.querySelectorAll(selector || '').length > 1);
+
+        if (!isWeak) continue; // already specific
+
+        // Try to resolve element: prefer exact query if it yields one element
+        let el = null;
+        try {
+          const nodes = document.querySelectorAll(selector);
+          if (nodes.length === 1) el = nodes[0];
+          else if (nodes.length > 1 && action._metadata && action._metadata.outerHTML) {
+            // try to match outerHTML snippet among candidates
+            for (const n of nodes) {
+              if (n.outerHTML && n.outerHTML.indexOf(action._metadata.outerHTML.trim().slice(0,60)) !== -1) {
+                el = n; break;
+              }
+            }
+          }
+        } catch (err) {
+          // ignore invalid selectors
+        }
+
+        // If not found, try matching outerHTML globally
+        if (!el && action._metadata && action._metadata.outerHTML) {
+          el = findElementByOuterHTML(action._metadata.outerHTML);
+        }
+
+        // If still not found, and action has value/text, try to find by text
+        if (!el && (action.value || action.text)) {
+          const text = (action.value || action.text).toString().trim();
+          if (text) {
+            const candidates = Array.from(document.querySelectorAll('*')).filter(n => n.textContent && n.textContent.indexOf(text) !== -1);
+            if (candidates.length === 1) el = candidates[0];
+          }
+        }
+
+        if (!el) continue; // can't resolve on this page
+
+        // Build full path selector and replace
+        const full = buildFullPathSelector(el);
+        if (full) {
+          const cleaned = stripAngularClasses(full);
+          action.selector = cleaned;
+          console.log('[Recorder] Fixed selector for action', action.action || action.type, '->', cleaned);
+        }
+      } catch (err) {
+        console.warn('[Recorder] __hiteman_fixSelectors per-action error', err);
+      }
+    }
+
+    // Put back into cloned structure
+    if (Array.isArray(cloned)) return cloned;
+    if (cloned.steps) cloned.steps = list;
+    else if (cloned.actions) cloned.actions = list;
+
+    // Trigger a download of the fixed recording for convenience
+    try {
+      const blob = new Blob([JSON.stringify(cloned, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'recording-fixed.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      // ignore download failures
+    }
+
+    return cloned;
+  } catch (err) {
+    console.error('[Recorder] __hiteman_fixSelectors error', err);
+    return recording;
+  }
+};
 
 function getCssSelector(element) {
   if (!element) return "";
