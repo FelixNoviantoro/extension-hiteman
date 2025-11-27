@@ -885,7 +885,7 @@ function stopRecording() {
 
 // Modifikasi fungsi handleClick untuk memastikan click pada image terekam
 function handleClick(e) {
-  console.log('[Recorder] handleClick fired:', e.target);
+  console.log('[Recorder] handleClick fired:', { target: e.target.tagName, classList: e.target.className, name: e.target.name });
   if (!isRecording) return;
 
   const element = e.target;
@@ -940,11 +940,9 @@ function handleClick(e) {
     element.tagName === "INPUT" &&
     ["checkbox", "radio"].includes(element.type)
   ) {
-    console.log('[Recorder] handleClick: akan recordAction INPUT checkbox/radio', element);
-    recordAction("click", element, {
-      command: "click",
-      value: ""
-    });
+    // This should never happen now due to the early return above, but keeping for safety
+    console.log('[Recorder] handleClick: UNEXPECTED checkbox/radio direct click - should have been skipped', element);
+    return;
   } else {
     console.log('[Recorder] handleClick: fallback recordAction', element);
     // Fallback: record click for any other element
@@ -959,21 +957,16 @@ function handleChange(e) {
   if (!isRecording) return;
 
   const element = e.target;
+  console.log('[Recorder] handleChange fired:', { target: element.tagName, name: element.name, type: element.type });
 
   if (element.tagName === "SELECT") {
+    console.log('[Recorder] handleChange: recording SELECT change');
     recordAction("select", element, {
       command: "selectOption",
       value: element.value,
     });
-  } else if (
-    element.tagName === "INPUT" &&
-    (element.type === "checkbox" || element.type === "radio")
-  ) {
-    recordAction("click", element, {
-      command: "click",
-      value: ""
-    });
   }
+  // Removed checkbox/radio handling - let handleClick record these via the visual element (SVG, etc.)
 }
 
 function handleInput(e) {
@@ -1104,19 +1097,18 @@ function handleSubmit(e) {
 }
 
 function recordAction(type, element, data) {
-  console.log('[Recorder] recordAction called:', { type, element, data });
+  console.log('[Recorder] recordAction called:', { type, command: data.command, element: element.name || element.tagName });
   const selector = getBestPlaywrightSelector(element);
 
   // Assertion format for custom assertion types
   if (type === "assert" && data.type && ["elementText", "elementVisible", "elementClass", "elementValue"].includes(data.type)) {
     recordedData.push(data);
-    console.log('[Recorder] recordedData after push (assertion):', recordedData);
+    console.log('[Recorder] ACTION RECORDED (assertion):', data);
     if (isRecording) {
       chrome.storage.local.set({ recordedData: recordedData }, () => {
         console.log('[Recorder] chrome.storage.local.set done:', recordedData);
       });
     }
-    console.log("Action recorded (assertion):", data);
     return;
   }
 
@@ -1153,16 +1145,14 @@ function recordAction(type, element, data) {
   };
 
   recordedData.push(action);
-  console.log('[Recorder] recordedData after push:', recordedData);
+  console.log('[Recorder] ACTION RECORDED:', { action: action.action, selector: action.selector });
 
   // Save updated recordedData
   if (isRecording) {
     chrome.storage.local.set({ recordedData: recordedData }, () => {
-      console.log('[Recorder] chrome.storage.local.set done:', recordedData);
+      console.log('[Recorder] chrome.storage.local.set done');
     });
   }
-
-  console.log("Action recorded:", action);
 }
 
 // Helper function to map commands to Playwright actions
@@ -1173,6 +1163,8 @@ function mapToPlaywrightAction(command, type) {
     'type': 'fill',
     'select': 'selectOption',
     'selectOption': 'selectOption',
+    'check': 'check',
+    'uncheck': 'uncheck',
     'submit': 'click',
     'assertVisible': 'waitForSelector'
   };
@@ -1570,43 +1562,64 @@ function buildTableContextSelector(element) {
   return `${rowRootSelector} ${pathSegment}`;
 }
 
-// Helper function to build full CSS path
+// Helper function to build full CSS path (improved: find unique ancestor first, then descend)
 function buildFullPathSelector(element) {
+  // Strategy 1: Build path from root down, stopping at a unique ancestor
+  // This mirrors Chrome DevTools behavior and works better for Tailwind-heavy sites
+  
   const path = [];
   let currentElement = element;
-
+  let ancestors = [];
+  
+  // Collect all ancestors up to root
   while (currentElement && currentElement.tagName !== 'HTML') {
-    let selector = currentElement.tagName.toLowerCase();
-
-    // Add ID if available
-    if (currentElement.id && !currentElement.id.match(/^[0-9]/)) {
-      selector = `#${CSS.escape(currentElement.id)}`;
-      path.unshift(selector);
+    ancestors.unshift(currentElement);
+    currentElement = currentElement.parentElement;
+  }
+  
+  // Find the closest unique ancestor (or use #app if available)
+  let startIndex = 0;
+  for (let i = 0; i < ancestors.length; i++) {
+    const ancestor = ancestors[i];
+    if (ancestor.id && !ancestor.id.match(/^[0-9]/)) {
+      startIndex = i;
       break;
     }
-
-    // Add classes
-    const meaningfulClasses = getMeaningfulClasses(currentElement);
+  }
+  
+  // Build path from the starting ancestor down to target element
+  for (let i = startIndex; i < ancestors.length; i++) {
+    const el = ancestors[i];
+    let selector = el.tagName.toLowerCase();
+    
+    // Add ID if present (best practice)
+    if (el.id && !el.id.match(/^[0-9]/)) {
+      selector = `#${CSS.escape(el.id)}`;
+      path.push(selector);
+      continue;
+    }
+    
+    // Add only the most essential classes (avoid utility clutter)
+    const meaningfulClasses = getMeaningfulClasses(el);
     if (meaningfulClasses.length > 0) {
       selector += '.' + meaningfulClasses.join('.');
     }
-
-    // Add nth-child for precision
-    if (currentElement.parentElement) {
-      const siblings = Array.from(currentElement.parentElement.children);
-      const index = siblings.indexOf(currentElement);
-      if (index !== -1 && siblings.length > 1) {
-        selector += `:nth-child(${index + 1})`;
+    
+    // Add nth-child only if there are multiple same-tag siblings
+    if (el.parentElement) {
+      const siblings = Array.from(el.parentElement.children);
+      const sameTagSiblings = siblings.filter(s => s.tagName === el.tagName);
+      if (sameTagSiblings.length > 1) {
+        const index = siblings.indexOf(el);
+        if (index !== -1) {
+          selector += `:nth-child(${index + 1})`;
+        }
       }
     }
-
-    path.unshift(selector);
-    currentElement = currentElement.parentElement;
-
-    // Stop if we have enough context
-    if (path.length >= 6) break;
+    
+    path.push(selector);
   }
-
+  
   return path.join(' > ');
 }
 
