@@ -6,6 +6,16 @@ let isTargetPage = false; // Flag untuk menandai halaman target
 let currentOverlay = null;
 let currentTooltip = null;
 let lastClickedElement = null;
+let lastHoveredElement = null;
+let hoverStartTime = null;
+let hoverTimeout = null;
+
+// Hover recording configuration
+const HOVER_CONFIG = {
+  minHoverTime: 3000, // Minimum time to consider it a deliberate hover (ms)
+  maxHoverTime: 5000, // Maximum time before recording
+  debounceTime: 300   // Debounce time for rapid hovers
+};
 
 // Helper: convert a recorded absolute URL into a simple pattern Playwright can wait for.
 // Prefer the last path/fragment segment so patterns look like '**/retribusi'.
@@ -794,6 +804,18 @@ function addControlPanel() {
         continue;
       }
 
+      if (act === 'hover' && step.selector) {
+        script += `    await page.waitForSelector('${esc(step.selector)}');\n`;
+        script += `    await page.hover('${esc(step.selector)}');\n`;
+
+        // Add optional wait based on recorded hover duration
+        const hoverWait = Math.min(step.duration || 1000, 3000);
+        if (hoverWait > 1000) {
+          script += `    await page.waitForTimeout(${hoverWait});\n`;
+        }
+        continue;
+      }
+
       // Generic: if the next recorded step has a different pageUrl, insert a wait to let navigation complete
       try {
         if (nextStep && step._metadata && nextStep._metadata && step._metadata.pageUrl && nextStep._metadata.pageUrl && step._metadata.pageUrl !== nextStep._metadata.pageUrl) {
@@ -870,7 +892,15 @@ function stopRecording() {
   document.removeEventListener("input", handleInput, true);
   document.removeEventListener("keyup", handleInput, true);
   document.removeEventListener("blur", handleBlur, true);
-  // document.removeEventListener("submit", handleSubmit, true);
+
+  // Clean up hover tracking
+  if (hoverTimeout) {
+    clearTimeout(hoverTimeout);
+    hoverTimeout = null;
+  }
+  lastHoveredElement = null;
+  hoverStartTime = null;
+
   inputBuffer = {};
 
   // Hentikan observasi
@@ -953,6 +983,54 @@ function handleClick(e) {
   }
 }
 
+function handleHover(e) {
+  if (!isRecording) return;
+
+  const element = e.target;
+
+  // Abaikan hover pada control panel dan overlay
+  if (
+    element.closest(".recorder-controls") ||
+    element.classList.contains("recorder-hover-overlay") ||
+    element.classList.contains("recorder-tooltip")
+  )
+    return;
+
+  // Clear any existing hover timeout
+  if (hoverTimeout) {
+    clearTimeout(hoverTimeout);
+    hoverTimeout = null;
+  }
+
+  // If this is a new element, start tracking hover time
+  if (element !== lastHoveredElement) {
+    lastHoveredElement = element;
+    hoverStartTime = Date.now();
+
+    // Set timeout to record hover action after minimum time
+    hoverTimeout = setTimeout(() => {
+      recordHoverAction(element);
+    }, HOVER_CONFIG.minHoverTime);
+  }
+
+  showOverlay(element, "hover");
+}
+
+function handleMouseOut(e) {
+  if (!isRecording) return;
+
+  // Clear hover tracking when mouse leaves
+  if (hoverTimeout) {
+    clearTimeout(hoverTimeout);
+    hoverTimeout = null;
+  }
+
+  lastHoveredElement = null;
+  hoverStartTime = null;
+
+  removeOverlay();
+}
+
 function handleChange(e) {
   if (!isRecording) return;
 
@@ -1024,18 +1102,18 @@ function handleBlur(e) {
         const matches = element.matches(lastAction.selector);
         if (matches) {
           selectorToUse = lastAction.selector;
-          try { console.log('[Recorder] handleBlur: reusing click selector', { selector: selectorToUse }); } catch (err) {}
+          try { console.log('[Recorder] handleBlur: reusing click selector', { selector: selectorToUse }); } catch (err) { }
         }
       }
     } catch (err) {
       // If selector reuse fails (e.g., :nth-child doesn't match after DOM change), fall through
-      try { console.warn('[Recorder] handleBlur: failed to reuse selector, will compute new one', err); } catch (e) {}
+      try { console.warn('[Recorder] handleBlur: failed to reuse selector, will compute new one', err); } catch (e) { }
     }
 
     // If we couldn't reuse the click selector, compute a fresh one
     if (!selectorToUse) {
       selectorToUse = getBestPlaywrightSelector(element);
-      try { console.log('[Recorder] handleBlur: computed new selector', { selector: selectorToUse }); } catch (err) {}
+      try { console.log('[Recorder] handleBlur: computed new selector', { selector: selectorToUse }); } catch (err) { }
     }
 
     // Manually construct action to use the reused selector
@@ -1059,11 +1137,11 @@ function handleBlur(e) {
     };
 
     recordedData.push(action);
-    try { console.log('[Recorder] fill recorded with selector:', { selector }); } catch (err) {}
+    try { console.log('[Recorder] fill recorded with selector:', { selector }); } catch (err) { }
 
     if (isRecording) {
       chrome.storage.local.set({ recordedData: recordedData }, () => {
-        try { console.log('[Recorder] chrome.storage.local.set done'); } catch (err) {}
+        try { console.log('[Recorder] chrome.storage.local.set done'); } catch (err) { }
       });
     }
 
@@ -1155,6 +1233,54 @@ function recordAction(type, element, data) {
   }
 }
 
+function recordHoverAction(element) {
+  if (!isRecording || !element) return;
+
+  const selector = getBestPlaywrightSelector(element);
+  const hoverDuration = Date.now() - hoverStartTime;
+
+  console.log('[Recorder] Recording hover action:', {
+    selector,
+    hoverDuration,
+    element: element.tagName
+  });
+
+  const action = {
+    action: 'hover',
+    selector: selector,
+    duration: Math.min(hoverDuration, HOVER_CONFIG.maxHoverTime),
+    _metadata: {
+      timestamp: new Date().toISOString(),
+      pageUrl: window.location.href,
+      originalCommand: 'hover',
+      elementInfo: {
+        tagName: element.tagName,
+        id: element.id,
+        className: element.className,
+        text: element.textContent?.trim()
+      }
+    }
+  };
+
+  recordedData.push(action);
+  console.log('[Recorder] HOVER ACTION RECORDED:', {
+    action: action.action,
+    selector: action.selector
+  });
+
+  // Save updated recordedData
+  if (isRecording) {
+    chrome.storage.local.set({ recordedData: recordedData }, () => {
+      console.log('[Recorder] chrome.storage.local.set done for hover');
+    });
+  }
+
+  // Reset hover tracking
+  lastHoveredElement = null;
+  hoverStartTime = null;
+  hoverTimeout = null;
+}
+
 // Helper function to map commands to Playwright actions
 function mapToPlaywrightAction(command, type) {
   const actionMap = {
@@ -1166,7 +1292,8 @@ function mapToPlaywrightAction(command, type) {
     'check': 'check',
     'uncheck': 'uncheck',
     'submit': 'click',
-    'assertVisible': 'waitForSelector'
+    'assertVisible': 'waitForSelector',
+    'hover': 'hover'
   };
 
   return actionMap[command] || 'click';
@@ -1190,80 +1317,143 @@ function stripAngularClasses(selector) {
   return cleaned;
 }
 
+function isValidSelector(selector) {
+  try {
+    document.querySelector(selector);
+    return true;
+  } catch (error) {
+    console.warn('[Recorder] Invalid selector detected:', selector, error);
+    return false;
+  }
+}
+
+function buildSimpleSelector(element) {
+  if (element.id && !element.id.match(/^[0-9]/)) {
+    return `#${CSS.escape(element.id)}`;
+  }
+  
+  // Use data attributes if available
+  const dataAttributes = ['data-testid', 'data-cy', 'data-id', 'data-qa'];
+  for (const attr of dataAttributes) {
+    if (element.hasAttribute(attr)) {
+      const value = element.getAttribute(attr);
+      if (value) {
+        return `[${attr}="${CSS.escape(value)}"]`;
+      }
+    }
+  }
+  
+  // Use role attribute
+  if (element.hasAttribute('role')) {
+    return `${element.tagName.toLowerCase()}[role="${CSS.escape(element.getAttribute('role'))}"]`;
+  }
+  
+  // Final fallback - tag name only
+  return element.tagName.toLowerCase();
+}
+
 // Fungsi untuk mendapatkan selector terbaik untuk Playwright
 function getBestPlaywrightSelector(element) {
   // 1. Data-testid atau data-cy (prioritaskan ini)
   if (element.dataset) {
     const testId = element.dataset.testid || element.dataset.cy;
     if (testId) {
-      return stripAngularClasses(`[data-testid="${testId}"]`);
+      const selector = `[data-testid="${CSS.escape(testId)}"]`;
+      if (isSelectorUnique(selector)) {
+        return stripAngularClasses(selector);
+      }
     }
   }
 
   // 2. ID yang unik
-  if (element.id && document.querySelectorAll(`#${element.id}`).length === 1) {
-    return stripAngularClasses(`#${element.id}`);
+  if (element.id && !element.id.match(/^[0-9]/)) {
+    const idSelector = `#${CSS.escape(element.id)}`;
+    if (isSelectorUnique(idSelector)) {
+      return stripAngularClasses(idSelector);
+    }
   }
 
   // 3. Untuk input elements, prioritaskan aria-label
   if (element.tagName === "INPUT" && element.getAttribute("aria-label")) {
-    return stripAngularClasses(`input[aria-label="${element.getAttribute("aria-label")}"]`);
+    const ariaLabel = element.getAttribute("aria-label");
+    const selector = `input[aria-label="${CSS.escape(ariaLabel)}"]`;
+    if (isSelectorUnique(selector)) {
+      return stripAngularClasses(selector);
+    }
   }
 
   // 4. Name attribute yang unik
   if (element.name && document.getElementsByName(element.name).length === 1) {
-    return stripAngularClasses(`[name="${element.name}"]`);
+    return stripAngularClasses(`[name="${CSS.escape(element.name)}"]`);
   }
 
   // 5. Placeholder yang unik untuk input
   if (element.placeholder) {
+    const placeholderValue = CSS.escape(element.placeholder);
     const samePlaceholder = document.querySelectorAll(
-      `[placeholder="${element.placeholder}"]`
+      `[placeholder="${placeholderValue}"]`
     );
     if (samePlaceholder.length === 1) {
-      return stripAngularClasses(`[placeholder="${element.placeholder}"]`);
+      return stripAngularClasses(`[placeholder="${placeholderValue}"]`);
     }
   }
 
   // 6. Role attribute
   if (element.getAttribute("role")) {
-    const role = element.getAttribute("role");
+    const role = CSS.escape(element.getAttribute("role"));
     const sameRole = document.querySelectorAll(`[role="${role}"]`);
     if (sameRole.length === 1) {
       return stripAngularClasses(`[role="${role}"]`);
     }
   }
 
-  // 7. Button/Link dengan text content
+  // 7. Button/Link dengan text content (FIXED: Proper escaping)
   if (
     (element.tagName === "BUTTON" || element.tagName === "A") &&
-    element.textContent.trim()
+    element.textContent?.trim()
   ) {
     const text = element.textContent.trim();
+    // Escape text for CSS selector
+    const escapedText = text.replace(/"/g, '\\"');
     const sameTextElements = Array.from(
       document.querySelectorAll(element.tagName)
-    ).filter((el) => el.textContent.trim() === text);
+    ).filter((el) => el.textContent?.trim() === text);
 
     if (sameTextElements.length === 1) {
       return stripAngularClasses(element.tagName === "A"
-        ? `text=${text}`
-        : `button:has-text("${text}")`);
+        ? `a:has-text("${escapedText}")`
+        : `button:has-text("${escapedText}")`);
     }
   }
 
   // 8. Untuk image elements
   if (element.tagName === "IMG" && element.alt) {
-    return stripAngularClasses(`img[alt="${element.alt}"]`);
+    const altText = CSS.escape(element.alt);
+    const selector = `img[alt="${altText}"]`;
+    if (isSelectorUnique(selector)) {
+      return stripAngularClasses(selector);
+    }
   }
 
-  // 9. CSS selector yang unik
+  // 9. CSS selector yang unik (FIXED: Proper class escaping)
   const cssSelector = buildPlaywrightCssSelector(element);
-  if (cssSelector) {
+  if (cssSelector && isValidSelector(cssSelector)) {
     return stripAngularClasses(cssSelector);
   }
 
   // 10. XPath sebagai fallback
-  return stripAngularClasses(getPlaywrightXPath(element));
+  const xpathSelector = getPlaywrightXPath(element);
+  return stripAngularClasses(xpathSelector);
+}
+
+// Helper: check if element has specific attributes
+function hasButtonAttributes(element) {
+  return element.tagName === 'BUTTON' && (
+    element.hasAttribute('title') ||
+    element.hasAttribute('onclick') ||
+    element.className.includes('text-primary') ||
+    element.className.includes('hover:')
+  );
 }
 
 function buildPlaywrightCssSelector(element) {
@@ -1271,34 +1461,9 @@ function buildPlaywrightCssSelector(element) {
 
   if (!element || !element.tagName) {
     console.warn('[Recorder] Invalid element provided');
-    return 'body'; // Fallback
+    return 'body';
   }
 
-  // Strategy 1: Try ID first (most reliable)
-  if (element.id && !element.id.match(/^[0-9]/)) {
-    const idSelector = `#${CSS.escape(element.id)}`;
-    if (isSelectorUnique(idSelector)) {
-      console.log('[Recorder] Using ID selector:', idSelector);
-      return stripAngularClasses(idSelector);
-    }
-  }
-
-  // Strategy 2: Try data-testid or other data attributes
-  const dataAttributes = ['data-testid', 'data-id', 'data-qa', 'data-cy', 'data-test'];
-  for (const attr of dataAttributes) {
-    if (element.hasAttribute(attr)) {
-      const value = element.getAttribute(attr);
-      if (value && value.trim()) {
-        const dataSelector = `[${attr}="${CSS.escape(value)}"]`;
-        if (isSelectorUnique(dataSelector)) {
-          console.log('[Recorder] Using data attribute selector:', dataSelector);
-          return stripAngularClasses(dataSelector);
-        }
-      }
-    }
-  }
-
-  // Strategy 3: Build comprehensive selector with multiple attributes
   let selector = element.tagName.toLowerCase();
 
   // Add type attribute for form elements
@@ -1325,63 +1490,65 @@ function buildPlaywrightCssSelector(element) {
     }
   }
 
-  // Add meaningful classes (more selective)
+  // Add meaningful classes with proper escaping
   const meaningfulClasses = getMeaningfulClasses(element);
   if (meaningfulClasses.length > 0) {
-    const classSelector = selector + '.' + meaningfulClasses.join('.');
-    if (isSelectorUnique(classSelector)) {
-      console.log('[Recorder] Using class-based selector:', classSelector);
-      return stripAngularClasses(classSelector);
-    }
-  }
+    // Escape each class name to handle special characters like :
+    const escapedClasses = meaningfulClasses.map(cls => {
+      try {
+        return CSS.escape(cls);
+      } catch (e) {
+        console.warn('[Recorder] Failed to escape class:', cls, e);
+        return '';
+      }
+    }).filter(cls => cls !== '');
 
-  // Strategy 4: Text content for buttons and links
-  if (['BUTTON', 'A', 'SPAN', 'DIV'].includes(element.tagName)) {
-    const text = element.textContent?.trim();
-    if (text && text.length > 0 && text.length < 50) {
-      const textSelector = `${selector}:has-text("${CSS.escape(text)}")`;
-      if (isSelectorUnique(textSelector)) {
-        console.log('[Recorder] Using text-based selector:', textSelector);
-        return stripAngularClasses(textSelector);
+    if (escapedClasses.length > 0) {
+      const classSelector = selector + '.' + escapedClasses.join('.');
+      if (isSelectorUnique(classSelector)) {
+        console.log('[Recorder] Using class-based selector:', classSelector);
+        return classSelector;
       }
     }
   }
 
-  // Strategy 5: Parent context with precise indexing
+  // Text content fallback with proper escaping
+  if (['BUTTON', 'A', 'SPAN', 'DIV', 'LI'].includes(element.tagName)) {
+    const text = element.textContent?.trim();
+    if (text && text.length > 0 && text.length < 50) {
+      const escapedText = text.replace(/"/g, '\\"');
+      const textSelector = `${selector}:has-text("${escapedText}")`;
+      if (isSelectorUnique(textSelector)) {
+        console.log('[Recorder] Using text-based selector:', textSelector);
+        return textSelector;
+      }
+    }
+  }
+
+  // Parent context with precise indexing
   const parentContextSelector = buildParentContextSelector(element);
   if (parentContextSelector && isSelectorUnique(parentContextSelector)) {
     console.log('[Recorder] Using parent context selector:', parentContextSelector);
-    return stripAngularClasses(parentContextSelector);
+    return parentContextSelector;
   }
 
-  // Strategy 6: Table-specific context (common in applications)
+  // Table-specific context
   const tableContextSelector = buildTableContextSelector(element);
   if (tableContextSelector && isSelectorUnique(tableContextSelector)) {
     console.log('[Recorder] Using table context selector:', tableContextSelector);
-    return stripAngularClasses(tableContextSelector);
+    return tableContextSelector;
   }
 
-  // Strategy 7: Full path with precise indexing
+  // Full path with precise indexing
   const fullPathSelector = buildFullPathSelector(element);
   if (fullPathSelector && isSelectorUnique(fullPathSelector)) {
     console.log('[Recorder] Using full path selector:', fullPathSelector);
-    return stripAngularClasses(fullPathSelector);
+    return fullPathSelector;
   }
 
-  // Final fallback
-  console.warn('[Recorder] Using fallback selector');
-  // Build a full DOM path as a precise fallback (includes parent IDs, classes, and nth-child)
-  try {
-    const fullPath = buildFullPathSelector(element);
-    if (fullPath) {
-      console.log('[Recorder] Using full-path fallback selector:', fullPath);
-      return stripAngularClasses(fullPath);
-    }
-  } catch (err) {
-    console.warn('[Recorder] buildFullPathSelector failed, falling back to simple selector', err);
-  }
-
-  return stripAngularClasses(selector);
+  // Final fallback - simple selector
+  console.warn('[Recorder] Using simple fallback selector');
+  return buildSimpleSelector(element);
 }
 
 // Helper function to check selector uniqueness
@@ -1394,7 +1561,7 @@ function isSelectorUnique(selector) {
   }
 }
 
-// Helper function to get meaningful classes
+// Updated getMeaningfulClasses with debug logging
 function getMeaningfulClasses(element) {
   let classStr = '';
 
@@ -1412,20 +1579,26 @@ function getMeaningfulClasses(element) {
       // Filter out meaningless classes
       if (!className || className.length < 2) return false;
       if (className.match(/^[0-9]/)) return false;
-      
+
       // Exclude Angular/framework classes
-      if (className.match(/^ng-/)) return false;  // ng-* prefix
-      if (className.match(/-inserted$/)) return false;  // -inserted suffix
-      if (className.match(/^_ng/)) return false;  // _ng* prefix
+      if (className.match(/^ng-/)) return false;
+      if (className.match(/-inserted$/)) return false;
+      if (className.match(/^_ng/)) return false;
+
+      // Exclude very generic utility classes
+      if (className.match(/^(p-|m-|w-|h-|text-|bg-|border-|rounded-|flex-|grid-)/)) {
+        // Only keep if it's more specific
+        return className.length > 6;
+      }
       
-      // Exclude state/theme classes (these change during interaction)
-      if (className.match(/^(active|inactive|selected|disabled|enabled|hidden|visible|focus|hover|visited)$/)) return false;
-      if (className.match(/^(nav-|btn-|text-|alert-|toast-)/)) return false;  // Theme/utility classes
+      // Keep structural/semantic classes
+      if (className.match(/^(js-|is-|has-)/)) return true;
+      if (className.match(/^(menu|nav|btn|button|header|footer|sidebar|content|container|wrapper)/)) return true;
       
-      // Keep only structural/semantic classes
-      if (className.match(/^(js-|is-|has-)/)) return true;  // Keep JS state classes
-      if (className.length > 3 && !className.match(/^[a-z]+-[0-9]/)) return true;  // Keep meaningful names
-      return false;
+      // Keep classes that indicate functionality
+      if (className.match(/^(group|hover|focus|active)/)) return true;
+      
+      return className.length > 3 && !className.match(/^[a-z]+-[0-9]/);
     })
     .slice(0, 3); // Limit to 3 most meaningful classes
 }
@@ -1566,17 +1739,17 @@ function buildTableContextSelector(element) {
 function buildFullPathSelector(element) {
   // Strategy 1: Build path from root down, stopping at a unique ancestor
   // This mirrors Chrome DevTools behavior and works better for Tailwind-heavy sites
-  
+
   const path = [];
   let currentElement = element;
   let ancestors = [];
-  
+
   // Collect all ancestors up to root
   while (currentElement && currentElement.tagName !== 'HTML') {
     ancestors.unshift(currentElement);
     currentElement = currentElement.parentElement;
   }
-  
+
   // Find the closest unique ancestor (or use #app if available)
   let startIndex = 0;
   for (let i = 0; i < ancestors.length; i++) {
@@ -1586,25 +1759,25 @@ function buildFullPathSelector(element) {
       break;
     }
   }
-  
+
   // Build path from the starting ancestor down to target element
   for (let i = startIndex; i < ancestors.length; i++) {
     const el = ancestors[i];
     let selector = el.tagName.toLowerCase();
-    
+
     // Add ID if present (best practice)
     if (el.id && !el.id.match(/^[0-9]/)) {
       selector = `#${CSS.escape(el.id)}`;
       path.push(selector);
       continue;
     }
-    
+
     // Add only the most essential classes (avoid utility clutter)
     const meaningfulClasses = getMeaningfulClasses(el);
     if (meaningfulClasses.length > 0) {
       selector += '.' + meaningfulClasses.join('.');
     }
-    
+
     // Add nth-child only if there are multiple same-tag siblings
     if (el.parentElement) {
       const siblings = Array.from(el.parentElement.children);
@@ -1616,10 +1789,10 @@ function buildFullPathSelector(element) {
         }
       }
     }
-    
+
     path.push(selector);
   }
-  
+
   return path.join(' > ');
 }
 
@@ -1727,7 +1900,7 @@ function getXPath(element) {
 // Usage (in page console where the extension runs on the same app page):
 //   const fixed = window.__hiteman_fixSelectors(myRecordingJson);
 //   // fixed is the modified JSON (same structure) with improved selectors where resolvable
-window.__hiteman_fixSelectors = function(recording) {
+window.__hiteman_fixSelectors = function (recording) {
   try {
     if (!recording) return recording;
 
@@ -1766,7 +1939,7 @@ window.__hiteman_fixSelectors = function(recording) {
           else if (nodes.length > 1 && action._metadata && action._metadata.outerHTML) {
             // try to match outerHTML snippet among candidates
             for (const n of nodes) {
-              if (n.outerHTML && n.outerHTML.indexOf(action._metadata.outerHTML.trim().slice(0,60)) !== -1) {
+              if (n.outerHTML && n.outerHTML.indexOf(action._metadata.outerHTML.trim().slice(0, 60)) !== -1) {
                 el = n; break;
               }
             }
@@ -2209,17 +2382,52 @@ function isMessageElement(element) {
 }
 
 function handleHover(e) {
-  if (!isRecording) return;
+  console.log('[Recorder] handleHover called', { isRecording, target: e.target.tagName });
+  
+  if (!isRecording) {
+    console.log('[Recorder] Not recording, skipping hover');
+    return;
+  }
 
   const element = e.target;
+  console.log('[Recorder] Hover element:', { 
+    tagName: element.tagName, 
+    className: element.className,
+    isControlPanel: !!element.closest(".recorder-controls"),
+    isOverlay: element.classList.contains("recorder-hover-overlay") || element.classList.contains("recorder-tooltip")
+  });
 
   // Abaikan hover pada control panel dan overlay
   if (
     element.closest(".recorder-controls") ||
     element.classList.contains("recorder-hover-overlay") ||
     element.classList.contains("recorder-tooltip")
-  )
+  ) {
+    console.log('[Recorder] Ignoring hover on control element');
     return;
+  }
+
+  // Clear any existing hover timeout
+  if (hoverTimeout) {
+    console.log('[Recorder] Clearing existing hover timeout');
+    clearTimeout(hoverTimeout);
+    hoverTimeout = null;
+  }
+
+  // If this is a new element, start tracking hover time
+  if (element !== lastHoveredElement) {
+    console.log('[Recorder] New hover element, starting timer');
+    lastHoveredElement = element;
+    hoverStartTime = Date.now();
+
+    // Set timeout to record hover action after minimum time
+    hoverTimeout = setTimeout(() => {
+      console.log('[Recorder] Hover timeout reached, recording action');
+      recordHoverAction(element);
+    }, HOVER_CONFIG.minHoverTime);
+  } else {
+    console.log('[Recorder] Continuing hover on same element');
+  }
 
   showOverlay(element, "hover");
 }
