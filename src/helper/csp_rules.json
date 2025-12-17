@@ -1,0 +1,49 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "operation": "remove",
+          "header": "content-security-policy"
+        },
+        {
+          "operation": "remove",
+          "header": "Content-Security-Policy"
+        },
+        {
+          "operation": "remove",
+          "header": "x-content-security-policy"
+        },
+        {
+          "operation": "remove",
+          "header": "X-Content-Security-Policy"
+        },
+        {
+          "operation": "remove",
+          "header": "x-webkit-csp"
+        },
+        {
+          "operation": "remove",
+          "header": "X-WebKit-CSP"
+        },
+        {
+          "operation": "set",
+          "header": "Content-Security-Policy",
+          "value": "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' 'inline-speculation-rules' http://localhost:* http://127.0.0.1:* chrome-extension://df026f69-bb7e-48ae-bf9a-7fba2495fe1e/ chrome-extension://nllboebijjnadifanmhbjeaegaokfhlh/; object-src 'self'"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*",
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame",
+        "xmlhttprequest",
+        "script"
+      ]
+    }
+  }
+]

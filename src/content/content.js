@@ -13,12 +13,36 @@ let lastClickedElement = null;
 let lastHoveredElement = null;
 let hoverStartTime = null;
 let hoverTimeout = null;
+let pendingApiAssertionIndex = null;
 
 const HOVER_CONFIG = {
   minHoverTime: 3000,
   maxHoverTime: 5000,
   debounceTime: 300
 };
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', addStyles);
+} else {
+  addStyles();
+}
+
+function addStyles() {
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes slideIn {
+      from {
+        transform: translateX(100%);
+        opacity: 0;
+      }
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 // ============================================
 // INITIALIZATION & MESSAGE HANDLING
@@ -72,12 +96,130 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (status && status.type === "RECORDING_STARTED") {
       isRecording = true;
       isTargetPage = true;
-      addControlPanel();
-      startRecording();
+
+      chrome.storage.local.get(["recordedData"], (result) => {
+        recordedData = result.recordedData || [];
+        console.log(`Restored recording with ${recordedData.length} steps after navigation`);
+
+        addControlPanel();
+        startRecording();
+      });
     }
     sendResponse({ status: "Restored" });
+  } else if (message.action === "API_CAPTURE_RESULT") {
+    console.log('API capture result received for action index:', message.actionIndex);
+    console.log('Captured API:', {
+      url: message.assertion?.target?.fullUrl,
+      method: message.assertion?.target?.method,
+      status: message.assertion?.expectedStatus
+    });
+    handleApiCaptureResult(message);
+    sendResponse({ status: "processed" });
+    return true;
+  } else if (message.action === "API_CAPTURE_TIMEOUT") {
+    console.log('API capture timeout for action index:', message.actionIndex);
+    handleApiCaptureTimeout(message);
+    sendResponse({ status: "processed" });
+    return true;
   }
 });
+
+function handleApiCaptureResult(message) {
+  const { assertion, actionIndex } = message;
+
+  // Find the action and add the assertion
+  if (actionIndex >= 0 && actionIndex < recordedData.length) {
+    const targetAction = recordedData[actionIndex];
+
+    if (!targetAction.assertAfter) {
+      targetAction.assertAfter = [];
+    }
+
+    targetAction.assertAfter.push(assertion);
+
+    // Update storage
+    chrome.storage.local.set({ recordedData: recordedData });
+
+    // Show success notification
+    showApiCaptureSuccessNotification(assertion);
+  }
+
+  pendingApiAssertionIndex = null;
+}
+
+function handleApiCaptureTimeout(message) {
+  const { actionIndex } = message;
+
+  // Show timeout notification
+  showApiCaptureTimeoutNotification();
+
+  pendingApiAssertionIndex = null;
+}
+
+function showApiCaptureSuccessNotification(assertion) {
+  const notification = document.createElement('div');
+  notification.className = 'api-capture-success';
+  notification.innerHTML = `
+    <div style="
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #2196F3;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 4px;
+      z-index: 1000000;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      animation: slideIn 0.3s ease;
+    ">
+      <div style="font-weight: bold;">✅ API Captured</div>
+      <div style="font-size: 12px; opacity: 0.9;">
+        ${assertion.target.method} ${assertion.target.fullUrl}<br>
+        Status: ${assertion.expectedStatus} ${assertion.expectedStatusText}
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(notification);
+
+  setTimeout(() => {
+    if (notification.parentNode) {
+      notification.parentNode.removeChild(notification);
+    }
+  }, 5000);
+}
+
+function showApiCaptureTimeoutNotification() {
+  const notification = document.createElement('div');
+  notification.className = 'api-capture-timeout';
+  notification.innerHTML = `
+    <div style="
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #FF9800;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 4px;
+      z-index: 1000000;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      animation: slideIn 0.3s ease;
+    ">
+      <div style="font-weight: bold;">⏰ API Capture Timeout</div>
+      <div style="font-size: 12px; opacity: 0.9;">
+        No API call detected within 10 seconds
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(notification);
+
+  setTimeout(() => {
+    if (notification.parentNode) {
+      notification.parentNode.removeChild(notification);
+    }
+  }, 5000);
+}
 
 // ============================================
 // CONTROL PANEL FUNCTIONS
@@ -189,12 +331,16 @@ function setupControlButtons(controls) {
   }
 }
 
-function handleStopButton() {
+async function handleStopButton() {
   try {
     isRecording = false;
     stopRecording();
 
+    // Force sync with storage to get the latest data
+    await syncWithStorage();
+
     const stepsWithWaits = transformStepsForExport(recordedData || []);
+
     const recordingData = {
       timestamp: new Date().toISOString(),
       data: stepsWithWaits,
@@ -213,16 +359,36 @@ function handleStopButton() {
       }
     };
 
-    chrome.runtime.sendMessage({ action: 'RECORDING_COMPLETED', data: recordingData });
-
-    if (window.opener) {
-      window.opener.postMessage({ type: 'RECORDING_COMPLETED', data: recordingData, playwrightData }, 'http://localhost:4200');
-    }
+    chrome.runtime.sendMessage({
+      action: 'RECORDING_COMPLETED',
+      data: recordingData,
+      playwrightData: playwrightData
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Background error:', chrome.runtime.lastError);
+        downloadJSONDirectly(playwrightData);
+      }
+    });
 
     updateUIAfterStop();
   } catch (err) {
-    console.error('[Recorder] stopBtn handler error:', err);
+    console.error('stopBtn handler error:', err);
   }
+}
+
+function downloadJSONDirectly(data) {
+  const jsonString = JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonString], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `hiTeman-fallback-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
 }
 
 function updateUIAfterStop() {
@@ -256,6 +422,7 @@ function startRecording() {
   document.addEventListener("mouseover", handleHover, true);
   document.addEventListener("mouseout", handleMouseOut, true);
   startObserver();
+  startSyncInterval();
 }
 
 function stopRecording() {
@@ -278,6 +445,9 @@ function stopRecording() {
 
   if (observer) observer.disconnect();
   removeOverlay();
+  stopSyncInterval();
+
+  syncWithStorage();
 }
 
 function cleanup() {
@@ -290,41 +460,60 @@ function cleanup() {
   removeOverlay();
 }
 
-window.addEventListener("unload", cleanup);
+function safeCleanup() {
+  if (isRecording) {
+    return;
+  }
+
+  chrome.storage.local.get(["isRecording"], (result) => {
+    if (!result.isRecording) {
+      inputBuffer = {};
+      if (observer) observer.disconnect();
+      removeControlPanel();
+      removeOverlay();
+    }
+  });
+}
 
 // ============================================
 // EVENT HANDLERS
 // ============================================
 
-function handleClick(e) {
+async function handleClick(e) {
   if (!isRecording) return;
   const element = e.target;
+
+  const isShiftClick = e.shiftKey;
+  let data = { command: "click", value: "" };
 
   if (element.closest(".recorder-controls") ||
     element.classList.contains("recorder-hover-overlay") ||
     element.classList.contains("recorder-tooltip")) return;
 
   showOverlay(element, "click");
-  setTimeout(() => {
-    if (currentOverlay && currentOverlay.classList.contains("recorder-click-overlay")) {
-      removeOverlay();
+
+  const savePromise = recordAction("click", element, data);
+
+  if (isShiftClick && savePromise) {
+    console.log('Shift+Click detected - starting API capture');
+    await savePromise;
+    
+    const actionIndex = recordedData.length - 1;
+    pendingApiAssertionIndex = actionIndex;
+
+    try {
+      // We don't need to send tabId, the background script will get it from sender.tab.id
+      const response = await chrome.runtime.sendMessage({
+        action: 'START_API_CAPTURE',
+        actionIndex: actionIndex
+        // Don't send tabId - background will get it from the message sender
+      });
+
+      console.log('API capture started:', response);
+      showApiCaptureNotification();
+    } catch (error) {
+      console.error('Failed to start API capture:', error);
     }
-  }, 500);
-
-  if (element.tagName === "IMG") {
-    recordAction("click", element, { command: "click", value: "" });
-    return;
-  }
-
-  if (element.tagName === "A") {
-    recordAction("click", element, { command: "click", value: "" });
-  } else if (element.tagName === "BUTTON" ||
-    (element.tagName === "INPUT" && ["button", "submit", "reset"].includes(element.type))) {
-    recordAction("click", element, { command: "click", value: "" });
-  } else if (element.tagName === "INPUT" && ["checkbox", "radio"].includes(element.type)) {
-    return;
-  } else {
-    recordAction("click", element, { command: "click", value: "" });
   }
 }
 
@@ -336,18 +525,20 @@ function handleHover(e) {
     element.classList.contains("recorder-hover-overlay") ||
     element.classList.contains("recorder-tooltip")) return;
 
+  // Clear any existing timeout
   if (hoverTimeout) {
     clearTimeout(hoverTimeout);
     hoverTimeout = null;
   }
 
-  if (element !== lastHoveredElement) {
-    lastHoveredElement = element;
-    hoverStartTime = Date.now();
-    hoverTimeout = setTimeout(() => {
-      recordHoverAction(element);
-    }, HOVER_CONFIG.minHoverTime);
-  }
+  // Set new hover tracking
+  lastHoveredElement = element;
+  hoverStartTime = Date.now();
+
+  hoverTimeout = setTimeout(() => {
+    recordHoverAction(element);
+    removeOverlay();
+  }, HOVER_CONFIG.minHoverTime);
 
   showOverlay(element, "hover");
 }
@@ -400,9 +591,7 @@ function handleBlur(e) {
         const matches = element.matches(lastAction.selector);
         if (matches) selectorToUse = lastAction.selector;
       }
-    } catch (err) {
-      // Fall through
-    }
+    } catch (err) { }
 
     if (!selectorToUse) selectorToUse = getBestPlaywrightSelector(element);
 
@@ -455,7 +644,7 @@ function recordAction(type, element, data) {
   if (type === "assert" && data.type && ["elementText", "elementVisible", "elementClass", "elementValue"].includes(data.type)) {
     recordedData.push(data);
     if (isRecording) chrome.storage.local.set({ recordedData: recordedData });
-    return;
+    return Promise.resolve({ status: 'success' });
   }
 
   let action = {
@@ -484,11 +673,20 @@ function recordAction(type, element, data) {
   };
 
   recordedData.push(action);
-  if (isRecording) chrome.storage.local.set({ recordedData: recordedData });
+  if (isRecording) {
+    chrome.storage.local.set({ recordedData: recordedData });
+  }
+  return Promise.resolve({ status: 'success' });
 }
 
 function recordHoverAction(element) {
   if (!isRecording || !element) return;
+
+  // Check if element is still in the DOM
+  if (!element.parentNode || !document.body.contains(element)) {
+    return;
+  }
+
   const selector = getBestPlaywrightSelector(element);
   const hoverDuration = Date.now() - hoverStartTime;
 
@@ -511,6 +709,7 @@ function recordHoverAction(element) {
 
   recordedData.push(action);
   if (isRecording) chrome.storage.local.set({ recordedData: recordedData });
+
   lastHoveredElement = null;
   hoverStartTime = null;
   hoverTimeout = null;
@@ -550,43 +749,8 @@ function stripAngularClasses(selector) {
   return cleaned;
 }
 
-function isValidSelector(selector) {
-  try {
-    document.querySelector(selector);
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
-function buildSimpleSelector(element) {
-  if (element.id && !element.id.match(/^[0-9]/)) {
-    return `#${CSS.escape(element.id)}`;
-  }
-
-  const dataAttributes = ['data-testid', 'data-cy', 'data-id', 'data-qa'];
-  for (const attr of dataAttributes) {
-    if (element.hasAttribute(attr)) {
-      const value = element.getAttribute(attr);
-      if (value) return `[${attr}="${CSS.escape(value)}"]`;
-    }
-  }
-
-  if (element.hasAttribute('role')) {
-    return `${element.tagName.toLowerCase()}[role="${CSS.escape(element.getAttribute('role'))}"]`;
-  }
-
-  return element.tagName.toLowerCase();
-}
-
 function getBestPlaywrightSelector(element) {
-
-  // ============================================================
-  // UTILITIES
-  // ============================================================
-
   const isUnique = (sel) => {
-    // Only return true if exactly one element matches the selector.
     try {
       return document.querySelectorAll(sel).length === 1;
     } catch (_) {
@@ -595,32 +759,25 @@ function getBestPlaywrightSelector(element) {
   };
 
   const clean = (selector) =>
-    // Removes common framework-specific attributes/classes (Angular, Material, etc.)
     selector.replace(/(ng-|cdk-|mat-|_ngcontent)[^\s"'=]*/g, "");
 
   const textOf = (el) =>
-    // Extracts and cleans visible text (trims, collapses multiple spaces)
     el.textContent?.trim().replace(/\s+/g, " ") || "";
 
   const visibleText = textOf(element);
 
   const escape = CSS.escape;
 
-  // Tailwind-safe class extraction
   const getMeaningfulClasses = (el) => {
     if (!el.classList) return [];
     return Array.from(el.classList).filter(cls => {
-      // remove framework / utility classes
       return !(
-        // Common Tailwind utility classes to ignore
         /^(p-|m-|gap-|grid-|flex-|rounded|w-|h-|text-|hover:|active:|focus:)/.test(cls) ||
-        // Common framework artifacts
         /(ng-|cdk-|mat-|_ngcontent)/.test(cls)
       );
     });
   };
 
-  // Click normalization: if SVG/Icon → find parent button/link
   const iconTags = ["SVG", "PATH", "I", "SPAN"];
   if (iconTags.includes(element.tagName)) {
     let p = element.parentElement;
@@ -635,9 +792,6 @@ function getBestPlaywrightSelector(element) {
 
   const tag = element.tagName.toLowerCase();
 
-  // ============================================================
-  // 1. data-testid / data-qa / data-cy (Highest Priority)
-  // ============================================================
   if (element.dataset) {
     for (const k of ["testid", "qa", "cy"]) {
       if (element.dataset[k]) {
@@ -647,88 +801,57 @@ function getBestPlaywrightSelector(element) {
     }
   }
 
-  // ============================================================
-  // 2. ID (if clean & unique)
-  // ============================================================
   if (element.id && !/^[0-9]/.test(element.id)) {
     const sel = `#${escape(element.id)}`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ============================================================
-  // 3. Inputs (Form-Specific Attributes)
-  // ============================================================
   if (tag === "input" || tag === "textarea" || tag === "select") {
-
-    // 3A: name attribute (ADJUSTED for consistent uniqueness check)
     if (element.name) {
       const sel = `[name="${escape(element.name)}"]`;
       if (isUnique(sel)) return clean(sel);
     }
 
-    // 3B: placeholder
     if (element.placeholder) {
       const sel = `[placeholder="${escape(element.placeholder)}"]`;
       if (isUnique(sel)) return clean(sel);
     }
-
-    // NOTE: Removed redundant aria-label check here. 
-    // It will be handled globally in step 6.
   }
 
-  // ============================================================
-  // 4. Button / Link text
-  // ============================================================
   if (["button", "a"].includes(tag)) {
     if (visibleText && visibleText.length <= 40) {
       const all = Array.from(document.querySelectorAll(tag));
       const match = all.filter(el => textOf(el) === visibleText);
       if (match.length === 1) {
-        // Use Playwright's :has-text() selector for text-based elements
         return `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
       }
     }
   }
 
-  // ============================================================
-  // 5. Title attribute
-  // ============================================================
   const title = element.getAttribute("title");
   if (title) {
     const sel = `${tag}[title="${escape(title)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ============================================================
-  // 6. aria-label (Generic Accessibility Attribute)
-  // ============================================================
   const ariaLabel = element.getAttribute("aria-label");
   if (ariaLabel) {
     const sel = `[aria-label="${escape(ariaLabel)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ============================================================
-  // 7. Meaningful CSS classes
-  // ============================================================
   const goodClasses = getMeaningfulClasses(element);
   if (goodClasses.length) {
     const sel = `${tag}.${goodClasses.map(escape).join(".")}`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ============================================================
-  // 8. role="button" etc.
-  // ============================================================
   const role = element.getAttribute("role");
   if (role) {
     const sel = `[role="${escape(role)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ============================================================
-  // 9. nth-of-type fallback (Playwright recommended)
-  // ============================================================
   if (element.parentElement) {
     const siblings = Array.from(element.parentElement.children)
       .filter(n => n.tagName.toLowerCase() === tag);
@@ -740,21 +863,23 @@ function getBestPlaywrightSelector(element) {
     }
   }
 
-  // ============================================================
-  // 10. XPath fallback (final)
-  // ============================================================
   return `xpath=${getXPath(element)}`;
 
-  // Simple XPath generator
   function getXPath(el) {
     if (el === document.body) return "/html/body";
+    if (!el || !el.parentNode) return "";
 
     const ix = (sib, name) =>
       Array.from(sib.parentNode.children)
         .filter(n => n.tagName === name).indexOf(sib) + 1;
 
+    const parentXPath = getXPath(el.parentNode);
+    if (parentXPath === "") {
+      return `/${el.tagName.toLowerCase()}[${ix(el, el.tagName)}]`;
+    }
+
     return (
-      getXPath(el.parentNode) +
+      parentXPath +
       "/" +
       el.tagName.toLowerCase() +
       "[" +
@@ -762,384 +887,6 @@ function getBestPlaywrightSelector(element) {
       "]"
     );
   }
-}
-
-
-
-function isSelectorUnique(selector) {
-  try {
-    return document.querySelectorAll(selector).length === 1;
-  } catch (error) {
-    return false;
-  }
-}
-
-function getBestPlaywrightSelector(element) {
-
-  // ============================================================
-  // UTILITIES
-  // ============================================================
-
-  const isUnique = (sel) => {
-    // Only return true if exactly one element matches the selector.
-    try {
-      return document.querySelectorAll(sel).length === 1;
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const clean = (selector) =>
-    // Removes common framework-specific attributes/classes (Angular, Material, etc.)
-    selector.replace(/(ng-|cdk-|mat-|_ngcontent)[^\s"'=]*/g, "");
-
-  const textOf = (el) =>
-    // Extracts and cleans visible text (trims, collapses multiple spaces)
-    el.textContent?.trim().replace(/\s+/g, " ") || "";
-
-  const visibleText = textOf(element);
-
-  const escape = CSS.escape;
-
-  // Tailwind-safe class extraction
-  const getMeaningfulClasses = (el) => {
-    if (!el.classList) return [];
-    return Array.from(el.classList).filter(cls => {
-      // remove framework / utility classes
-      return !(
-        // Common Tailwind utility classes to ignore
-        /^(p-|m-|gap-|grid-|flex-|rounded|w-|h-|text-|hover:|active:|focus:)/.test(cls) ||
-        // Common framework artifacts
-        /(ng-|cdk-|mat-|_ngcontent)/.test(cls)
-      );
-    });
-  };
-
-  // Click normalization: if SVG/Icon → find parent button/link
-  const iconTags = ["SVG", "PATH", "I", "SPAN"];
-  if (iconTags.includes(element.tagName)) {
-    let p = element.parentElement;
-    while (p && p !== document.body) {
-      if (["BUTTON", "A"].includes(p.tagName) || p.getAttribute("role") === "button") {
-        element = p;
-        break;
-      }
-      p = p.parentElement;
-    }
-  }
-
-  const tag = element.tagName.toLowerCase();
-
-  // ============================================================
-  // 1. data-testid / data-qa / data-cy (Highest Priority)
-  // ============================================================
-  if (element.dataset) {
-    for (const k of ["testid", "qa", "cy"]) {
-      if (element.dataset[k]) {
-        const sel = `[data-${k}="${escape(element.dataset[k])}"]`;
-        if (isUnique(sel)) return clean(sel);
-      }
-    }
-  }
-
-  // ============================================================
-  // 2. ID (if clean & unique)
-  // ============================================================
-  if (element.id && !/^[0-9]/.test(element.id)) {
-    const sel = `#${escape(element.id)}`;
-    if (isUnique(sel)) return clean(sel);
-  }
-
-  // ============================================================
-  // 3. Inputs (Form-Specific Attributes)
-  // ============================================================
-  if (tag === "input" || tag === "textarea" || tag === "select") {
-
-    // 3A: name attribute (ADJUSTED for consistent uniqueness check)
-    if (element.name) {
-      const sel = `[name="${escape(element.name)}"]`;
-      if (isUnique(sel)) return clean(sel);
-    }
-
-    // 3B: placeholder
-    if (element.placeholder) {
-      const sel = `[placeholder="${escape(element.placeholder)}"]`;
-      if (isUnique(sel)) return clean(sel);
-    }
-
-    // NOTE: Removed redundant aria-label check here. 
-    // It will be handled globally in step 6.
-  }
-
-  // ============================================================
-  // 4. Button / Link text
-  // ============================================================
-  if (["button", "a"].includes(tag)) {
-    if (visibleText && visibleText.length <= 40) {
-      const all = Array.from(document.querySelectorAll(tag));
-      const match = all.filter(el => textOf(el) === visibleText);
-      if (match.length === 1) {
-        // Use Playwright's :has-text() selector for text-based elements
-        return `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
-      }
-    }
-  }
-
-  // ============================================================
-  // 5. Title attribute
-  // ============================================================
-  const title = element.getAttribute("title");
-  if (title) {
-    const sel = `${tag}[title="${escape(title)}"]`;
-    if (isUnique(sel)) return clean(sel);
-  }
-
-  // ============================================================
-  // 6. aria-label (Generic Accessibility Attribute)
-  // ============================================================
-  const ariaLabel = element.getAttribute("aria-label");
-  if (ariaLabel) {
-    const sel = `[aria-label="${escape(ariaLabel)}"]`;
-    if (isUnique(sel)) return clean(sel);
-  }
-
-  // ============================================================
-  // 7. Meaningful CSS classes
-  // ============================================================
-  const goodClasses = getMeaningfulClasses(element);
-  if (goodClasses.length) {
-    const sel = `${tag}.${goodClasses.map(escape).join(".")}`;
-    if (isUnique(sel)) return clean(sel);
-  }
-
-  // ============================================================
-  // 8. role="button" etc.
-  // ============================================================
-  const role = element.getAttribute("role");
-  if (role) {
-    const sel = `[role="${escape(role)}"]`;
-    if (isUnique(sel)) return clean(sel);
-  }
-
-  // ============================================================
-  // 9. nth-of-type fallback (Playwright recommended)
-  // ============================================================
-  if (element.parentElement) {
-    const siblings = Array.from(element.parentElement.children)
-      .filter(n => n.tagName.toLowerCase() === tag);
-
-    if (siblings.length > 1) {
-      const idx = siblings.indexOf(element) + 1;
-      const sel = `${tag}:nth-of-type(${idx})`;
-      if (isUnique(sel)) return clean(sel);
-    }
-  }
-
-  // ============================================================
-  // 10. XPath fallback (final)
-  // ============================================================
-  return `xpath=${getXPath(element)}`;
-
-  // Simple XPath generator
-  function getXPath(el) {
-    if (el === document.body) return "/html/body";
-
-    const ix = (sib, name) =>
-      Array.from(sib.parentNode.children)
-        .filter(n => n.tagName === name).indexOf(sib) + 1;
-
-    return (
-      getXPath(el.parentNode) +
-      "/" +
-      el.tagName.toLowerCase() +
-      "[" +
-      ix(el, el.tagName) +
-      "]"
-    );
-  }
-}
-
-function getDirectTextContent(element) {
-  let text = '';
-  for (const node of element.childNodes) {
-    if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
-  }
-  return text.trim();
-}
-
-function getMeaningfulClasses(element) {
-  let classStr = '';
-  if (typeof element.className === 'string') classStr = element.className;
-  else if (typeof element.className?.baseVal === 'string') classStr = element.className.baseVal;
-  if (!classStr) return [];
-
-  const classes = classStr.split(' ').filter(Boolean);
-  const hasNoIdentifier = !element.id && !element.getAttribute('name') && !element.getAttribute('title') && !getDirectTextContent(element);
-
-  return classes.filter(className => {
-    if (!className || className.length < 2) return false;
-    if (className.match(/^[0-9]/)) return false;
-    if (className.match(/^ng-/)) return false;
-    if (className.match(/-inserted$/)) return false;
-    if (className.match(/^_ng/)) return false;
-
-    if (hasNoIdentifier) return true;
-    if (className.match(/^(p-\d|m-\d|w-\d|h-\d)$/)) return false;
-    if (className.match(/^(js-|is-|has-)/)) return true;
-    if (className.match(/(menu|nav|btn|button|header|footer|sidebar|content|container|wrapper)/)) return true;
-    if (className.match(/^(group|hover|focus|active|text-|bg-|border-|rounded)/)) return true;
-    return className.length > 2;
-  }).slice(0, 5);
-}
-
-function buildParentContextSelector(element, maxDepth = 4) {
-  let currentElement = element;
-  let depth = 0;
-  let pathParts = [buildElementSelector(currentElement)];
-
-  while (currentElement.parentElement && depth < maxDepth) {
-    currentElement = currentElement.parentElement;
-    if (currentElement.tagName === 'BODY' || currentElement.tagName === 'HTML') break;
-
-    const parentSelector = buildElementSelector(currentElement);
-    pathParts.unshift(parentSelector);
-    const currentPath = pathParts.join(' > ');
-    if (isSelectorUnique(currentPath)) return currentPath;
-    depth++;
-  }
-  return null;
-}
-
-function buildElementSelector(element) {
-  let selector = element.tagName.toLowerCase();
-  if (element.id && !element.id.match(/^[0-9]/)) return `#${CSS.escape(element.id)}`;
-
-  const meaningfulClasses = getMeaningfulClasses(element);
-  if (meaningfulClasses.length > 0) selector += '.' + meaningfulClasses.join('.');
-
-  if (element.parentElement) {
-    const siblings = Array.from(element.parentElement.children);
-    const sameTagSiblings = siblings.filter(sib => sib.tagName === element.tagName);
-
-    if (sameTagSiblings.length > 1) {
-      const index = sameTagSiblings.indexOf(element);
-      if (index !== -1) {
-        const nthOfTypeSelector = `${selector}:nth-of-type(${index + 1})`;
-        if (isSelectorUnique(nthOfTypeSelector)) return nthOfTypeSelector;
-        const allSiblingsIndex = siblings.indexOf(element);
-        if (allSiblingsIndex !== -1) return `${selector}:nth-child(${allSiblingsIndex + 1})`;
-      }
-    }
-  }
-  return selector;
-}
-
-function buildTableContextSelector(element) {
-  const row = element.closest('tr');
-  if (!row) return null;
-
-  let uniqueRowText = '';
-  const cells = Array.from(row.querySelectorAll('td, th'));
-  for (const cell of cells) {
-    const text = cell.textContent?.trim();
-    if (text && text.length > 5 && !/^[0-9.,\sR]+$/.test(text)) {
-      uniqueRowText = text;
-      break;
-    }
-  }
-  if (!uniqueRowText) return null;
-
-  const rowRootSelector = `tr:has-text("${CSS.escape(uniqueRowText)}")`;
-  let pathSegment = '';
-  let current = element;
-
-  while (current && current !== row) {
-    const tagName = current.tagName.toLowerCase();
-    let currentSelector = tagName;
-    const meaningfulClasses = getMeaningfulClasses(current);
-    if (meaningfulClasses.length > 0) currentSelector += '.' + meaningfulClasses.join('.');
-    pathSegment = currentSelector + (pathSegment ? ' > ' + pathSegment : '');
-    current = current.parentElement;
-  }
-
-  return `${rowRootSelector} ${pathSegment}`;
-}
-
-function buildFullPathSelector(element) {
-  const path = [];
-  let currentElement = element;
-  let ancestors = [];
-
-  while (currentElement && currentElement.tagName !== 'HTML') {
-    ancestors.unshift(currentElement);
-    currentElement = currentElement.parentElement;
-  }
-
-  let startIndex = 0;
-  for (let i = 0; i < ancestors.length; i++) {
-    const ancestor = ancestors[i];
-    if (ancestor.id && !ancestor.id.match(/^[0-9]/)) {
-      startIndex = i;
-      break;
-    }
-  }
-
-  for (let i = startIndex; i < ancestors.length; i++) {
-    const el = ancestors[i];
-    let selector = el.tagName.toLowerCase();
-
-    if (el.id && !el.id.match(/^[0-9]/)) {
-      selector = `#${CSS.escape(el.id)}`;
-      path.push(selector);
-      continue;
-    }
-
-    const meaningfulClasses = getMeaningfulClasses(el);
-    if (meaningfulClasses.length > 0) selector += '.' + meaningfulClasses.join('.');
-
-    if (el.parentElement) {
-      const siblings = Array.from(el.parentElement.children);
-      const sameTagSiblings = siblings.filter(s => s.tagName === el.tagName);
-      if (sameTagSiblings.length > 1) {
-        const index = siblings.indexOf(el);
-        if (index !== -1) selector += `:nth-child(${index + 1})`;
-      }
-    }
-    path.push(selector);
-  }
-  return path.join(' > ');
-}
-
-function getPlaywrightXPath(element) {
-  const parts = [];
-  let current = element;
-
-  while (current && current.nodeType === Node.ELEMENT_NODE) {
-    let selector = current.tagName.toLowerCase();
-    if (current.id) return `xpath=//*[@id="${current.id}"]`;
-
-    const attributes = [];
-    ["name", "class", "role", "type", "aria-label"].forEach((attr) => {
-      const value = current.getAttribute(attr);
-      if (value) attributes.push(`@${attr}="${value}"`);
-    });
-
-    if (attributes.length > 0) selector += `[${attributes.join(" and ")}]`;
-
-    const siblings = current.parentNode ? Array.from(current.parentNode.children) : [];
-    const similarSiblings = siblings.filter((sibling) => sibling.tagName === current.tagName);
-
-    if (similarSiblings.length > 1) {
-      const index = similarSiblings.indexOf(current) + 1;
-      selector += `[${index}]`;
-    }
-
-    parts.unshift(selector);
-    current = current.parentNode;
-    if (parts.length >= 3) break;
-  }
-
-  return `xpath=//${parts.join("/")}`;
 }
 
 function getUniqueElementKey(element) {
@@ -1314,129 +1061,58 @@ function removeAssertionMenu() {
 // EXPORT & TRANSFORMATION FUNCTIONS
 // ============================================
 
-function urlToPattern(u) {
-  try {
-    const parsed = new URL(u);
-    let route = '';
-    if (parsed.hash && parsed.hash.length > 1) {
-      route = parsed.hash.slice(1);
-    } else {
-      route = parsed.pathname || '';
-    }
-    const parts = route.split('/').filter(Boolean);
-    if (parts.length > 0) return `**/${parts[parts.length - 1]}`;
-    return u;
-  } catch (err) {
-    return u;
-  }
-}
-
 function transformStepsForExport(rawSteps) {
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return [];
-  const out = [];
 
-  for (let i = 0; i < rawSteps.length; i++) {
-    const step = rawSteps[i];
-    const nextStep = rawSteps[i + 1];
-    out.push(step);
+  const cleanedSteps = rawSteps.map((step, index) => {
+    const cleanStep = JSON.parse(JSON.stringify(step));
 
-    try {
-      const curUrl = step?._metadata?.pageUrl;
-      const nextUrl = nextStep?._metadata?.pageUrl;
-
-      // Insert framework stabilization wait AFTER navigation / URL change.
-      if (nextStep && curUrl && nextUrl && curUrl !== nextUrl) {
-        out.push({
-          action: 'goto',
-          url: nextUrl,
-          _metadata: { inserted: true, pageUrl: nextUrl }
-        });
-
-        // Single stabilization delay
-        out.push({
-          action: 'waitForTimeout',
-          timeout: 500,
-          _metadata: { inserted: true, purpose: 'framework-stabilization' }
-        });
+    // Clean up empty fields, but preserve duration for hover actions
+    const emptyFields = ['key', 'ms', 'to', 'from', 'value', 'timeout'];
+    emptyFields.forEach(field => {
+      if (cleanStep[field] === '' || cleanStep[field] === null || cleanStep[field] === undefined) {
+        delete cleanStep[field];
       }
+    });
 
-    } catch (err) { }
-  }
-
-  // Deduplicate
-  const deduped = [];
-  for (let i = 0; i < out.length; i++) {
-    const cur = out[i];
-    const prev = deduped.length ? deduped[deduped.length - 1] : null;
-    if (!isSameAction(prev, cur)) deduped.push(cur);
-    else if (prev && cur && cur._metadata) {
-      prev._metadata = Object.assign({}, prev._metadata || {}, cur._metadata || {});
+    // Don't delete duration for hover actions
+    if (cleanStep.action !== 'hover' && (cleanStep.duration === '' || cleanStep.duration === null || cleanStep.duration === undefined)) {
+      delete cleanStep.duration;
     }
-  }
 
-  return deduped;
-}
+    // Clean metadata
+    if (cleanStep._metadata) {
+      Object.keys(cleanStep._metadata).forEach(key => {
+        if (cleanStep._metadata[key] === '' || cleanStep._metadata[key] === null || cleanStep._metadata[key] === undefined) {
+          delete cleanStep._metadata[key];
+        }
+      });
 
-
-function isSameAction(a, b) {
-  if (!a || !b) return false;
-  if (a.action !== b.action) return false;
-
-  const aSel = a.selector || '';
-  const bSel = b.selector || '';
-  if (aSel !== bSel) return false;
-
-  const aVal = (a.value !== undefined) ? String(a.value) : '';
-  const bVal = (b.value !== undefined) ? String(b.value) : '';
-  if (aVal !== bVal) return false;
-
-  const aUrl = a.url || '';
-  const bUrl = b.url || '';
-  if (aUrl !== bUrl) return false;
-
-  const aState = a.state || '';
-  const bState = b.state || '';
-  if (aState !== bState) return false;
-
-  return true;
-}
-
-function createEvaluateFallback(step) {
-  const selector = step.selector;
-  let expression = '';
-
-  switch (step.action) {
-    case 'click':
-      expression = `document.querySelector('${selector}')?.click();`;
-      break;
-    case 'fill':
-      const escapedValue = (step.value || '').replace(/'/g, "\\'");
-      expression = `const el=document.querySelector('${selector}');if(el){el.value='${escapedValue}';el.dispatchEvent(new Event('input',{bubbles:true}));}`;
-      break;
-    case 'check':
-      expression = `const el=document.querySelector('${selector}');if(el){el.checked=true;el.dispatchEvent(new Event('change',{bubbles:true}));}`;
-      break;
-    case 'selectOption':
-      const escapedOptionValue = (step.value || '').replace(/'/g, "\\'");
-      expression = `const el=document.querySelector('${selector}');if(el){el.value='${escapedOptionValue}';el.dispatchEvent(new Event('change',{bubbles:true}));}`;
-      break;
-    default:
-      expression = `console.log('Fallback for ${step.action}');`;
-  }
-
-  return {
-    action: 'evaluate',
-    selector: step.selector,
-    value: expression,
-    _metadata: {
-      ...step._metadata,
-      inserted: true,
-      isFallback: true,
-      originalAction: step.action,
-      originalSelector: step.selector,
-      purpose: 'fallback'
+      if (Object.keys(cleanStep._metadata).length === 0) {
+        delete cleanStep._metadata;
+      }
     }
-  };
+
+    return cleanStep;
+  });
+
+  const finalSteps = cleanedSteps.filter(step => {
+    // Essential fields check - hover actions need action and selector
+    const hasEssentialFields = step.action && (
+      step.selector || // For click, fill, hover, etc.
+      step.url || // For goto
+      step.assertAfter !== undefined // For assertions
+    );
+
+    const hasContent = Object.keys(step).length > 0;
+
+    if (!hasEssentialFields || !hasContent) {
+      return false;
+    }
+    return true;
+  });
+
+  return finalSteps;
 }
 
 function generatePlaywrightScriptFromSteps(steps) {
@@ -1653,15 +1329,8 @@ function downloadFile(content, filename, type) {
 function startObserver() {
   observer = new MutationObserver((mutations) => {
     if (!isRecording) return;
-
-    mutations.forEach((mutation) => {
-      // We're disabling automatic detection of loading states
-      // Only keep observer active for potential future use cases
-      // For now, we won't process any mutations
-    });
   });
 
-  // Still observe but won't trigger any actions
   observer.observe(document.body, {
     childList: true,
     attributes: true,
@@ -1671,165 +1340,64 @@ function startObserver() {
   });
 }
 
-function checkVisibilityAndContent(element) {
-  return;
-  // if (element.closest(".recorder-controls") ||
-  //   !isElementVisible(element) ||
-  //   element.closest(".recorder-hover-overlay") ||
-  //   element.closest(".recorder-tooltip")) return;
-
-  // const text = element.textContent?.trim();
-  // if (!text || text.length < 3 || text.length > 200) return;
-
-  // if (isDialog(element)) {
-  //   recordAction("assert", element, {
-  //     command: "assertVisible",
-  //     value: text,
-  //     type: "dialog",
-  //   });
-  //   return;
-  // }
-
-  // if (isImportantMessage(element)) {
-  //   setTimeout(() => {
-  //     if (isElementVisible(element) && element.textContent?.trim() === text && shouldRecordMessage(element, text)) {
-  //       recordAction("assert", element, {
-  //         command: "assertVisible",
-  //         value: "",
-  //         type: getMessageType(text),
-  //       });
-  //     }
-  //   }, 500);
-  // }
-}
-
-function shouldRecordMessage(element, text) {
-  if (element.tagName === "DIV" && (!element.className || element.className.length < 3)) return false;
-
-  const commonMessages = ["loading", "please wait", "mohon tunggu", "welcome", "selamat datang"];
-  if (commonMessages.some((msg) => text.toLowerCase().includes(msg))) return false;
-
-  const hasMessageCharacteristics =
-    element.getAttribute("role") === "alert" ||
-    element.getAttribute("aria-live") === "polite" ||
-    element.classList.contains("alert") ||
-    element.classList.contains("message") ||
-    element.classList.contains("notification") ||
-    element.classList.contains("toast") ||
-    element.closest('[role="alert"]') ||
-    element.closest(".alert") ||
-    element.closest(".message") ||
-    element.closest(".notification");
-
-  return hasMessageCharacteristics;
-}
-
-function getMessageType(text) {
-  if (isErrorMessage(text)) return "error";
-  if (isWarningMessage(text)) return "warning";
-  if (isSuccessMessage(text)) return "success";
-  return "info";
-}
-
-function isImportantMessage(element) {
-  const importantRoles = ["alert", "status"];
-  if (importantRoles.includes(element.getAttribute("role"))) return true;
-
-  const importantClasses = [
-    "alert-danger", "alert-warning", "alert-success", "alert-info",
-    "toast-error", "toast-warning", "toast-success", "toast-info",
-    "notification--error", "notification--warning", "notification--success"
-  ];
-
-  const hasImportantClass = importantClasses.some((className) =>
-    element.classList.contains(className) || element.closest(`.${className}`)
-  );
-  if (hasImportantClass) return true;
-
-  const hasImportantAria = ["aria-invalid", "aria-errormessage"].some((attr) =>
-    element.hasAttribute(attr)
-  );
-  if (hasImportantAria) return true;
-
-  const text = element.textContent?.trim().toLowerCase();
-  if (!text) return false;
-  return shouldRecordMessage(element, text) &&
-    (isErrorMessage(text) || isWarningMessage(text) || isSuccessMessage(text));
-}
-
-function isDialog(element) {
-  if (element.getAttribute("role") === "dialog" ||
-    element.getAttribute("role") === "alertdialog") return true;
-
-  const dialogClasses = ["modal", "dialog", "popup", "overlay", "lightbox", "drawer", "popover"];
-  const hasDialogClass = dialogClasses.some((className) => {
-    const elementClasses = element.className.toLowerCase();
-    return elementClasses.includes(className) &&
-      !elementClasses.includes("wrapper") &&
-      !elementClasses.includes("container");
+async function syncWithStorage() {
+  return new Promise(resolve => {
+    chrome.storage.local.get(["recordedData"], (result) => {
+      const storageData = result.recordedData || [];
+      recordedData = storageData;
+      resolve();
+    });
   });
-  if (hasDialogClass) return true;
-  if (element.getAttribute("aria-modal") === "true") return true;
-  return false;
 }
 
-function isElementVisible(element) {
-  const style = window.getComputedStyle(element);
-  return style.display !== "none" &&
-    style.visibility !== "hidden" &&
-    style.opacity !== "0" &&
-    element.offsetParent !== null;
-}
+let syncInterval = null;
 
-function isErrorMessage(text) {
-  const errorKeywords = [
-    "error", "invalid", "failed", "incorrect", "wrong", "gagal", "salah",
-    "tidak valid", "tidak benar", "required", "wajib diisi", "tidak ditemukan",
-    "tidak tersedia", "tidak sesuai", "tidak boleh kosong", "denied", "rejected",
-    "unauthorized", "forbidden"
-  ];
-  return errorKeywords.some((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
-}
-
-function isSuccessMessage(text) {
-  const successKeywords = [
-    "success", "successful", "succeeded", "berhasil", "saved", "tersimpan",
-    "completed", "selesai", "updated", "diperbarui", "created", "dibuat"
-  ];
-  return successKeywords.some((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
-}
-
-function isWarningMessage(text) {
-  const warningKeywords = ["warning", "perhatian", "hati-hati", "caution"];
-  return warningKeywords.some((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
-}
-
-function isMessageElement(element) {
-  const messageRoles = ["alert", "status", "log"];
-  if (messageRoles.includes(element.getAttribute("role"))) return true;
-
-  const messageClasses = ["alert", "message", "notification", "toast", "error", "success", "warning", "info"];
-  const hasMessageClass = messageClasses.some((className) => {
-    const elementClasses = element.className.toLowerCase();
-    return elementClasses.includes(className.toLowerCase()) &&
-      !elementClasses.includes("wrapper") &&
-      !elementClasses.includes("container");
-  });
-  if (hasMessageClass) return true;
-
-  if (element.hasAttribute("aria-live")) return true;
-
-  let parent = element.parentElement;
-  let level = 0;
-  while (parent && level < 2) {
-    if (messageRoles.includes(parent.getAttribute("role")) ||
-      messageClasses.some((c) => parent.className.toLowerCase().includes(c.toLowerCase()))) {
-      return true;
+function startSyncInterval() {
+  if (syncInterval) clearInterval(syncInterval);
+  syncInterval = setInterval(() => {
+    if (isRecording) {
+      syncWithStorage();
     }
-    parent = parent.parentElement;
-    level++;
+  }, 2000);
+}
+
+function stopSyncInterval() {
+  if (syncInterval) {
+    clearInterval(syncInterval);
+    syncInterval = null;
   }
-  return false;
+}
+
+function showApiCaptureNotification() {
+  const notification = document.createElement('div');
+  notification.className = 'api-capture-notification';
+  notification.innerHTML = `
+    <div style="
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #4CAF50;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 4px;
+      z-index: 1000000;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      animation: slideIn 0.3s ease;
+    ">
+      <div style="font-weight: bold;">🎯 API Capture Active</div>
+      <div style="font-size: 12px; opacity: 0.9;">
+        Recording next API call... (10s timeout)
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(notification);
+
+  setTimeout(() => {
+    if (notification.parentNode) {
+      notification.parentNode.removeChild(notification);
+    }
+  }, 3000);
 }
 
 window.__hiteman_fixSelectors = function (recording) {
@@ -1912,3 +1480,5 @@ window.__hiteman_fixSelectors = function (recording) {
     return recording;
   }
 };
+
+window.addEventListener("unload", safeCleanup);

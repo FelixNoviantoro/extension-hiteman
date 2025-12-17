@@ -52,6 +52,13 @@ document.addEventListener('DOMContentLoaded', () => {
       startRecording();
     });
   }
+
+  // NEW: Only restore API data if NOT on the recorder page
+  const isRecorderPage = window.location.href.includes('recorder.html');
+  if (!isRecorderPage && typeof restorePendingApiData === 'function') {
+    // This is a page being recorded, restore API data
+    setTimeout(restorePendingApiData, 500);
+  }
 });
 
 // Tambah handler untuk tombol check storage
