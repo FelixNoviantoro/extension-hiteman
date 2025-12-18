@@ -59,54 +59,117 @@ chrome.storage.local.get(["isRecording", "recordedData"], (result) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log('Content script received message:', message.action);
+  
   if (message.action === "startRecording") {
+    console.log('=== START RECORDING ===');
+    console.log('Current URL:', window.location.href);
+    
     isTargetPage = true;
     isRecording = true;
     recordedData = [];
 
-    chrome.storage.local.set({
-      isRecording: true,
-      recordedData: recordedData,
-    });
+    console.log('Initialized empty recordedData array');
 
-    recordAction("open", document.body, {
+    // First record the open action
+    const openActionPromise = recordAction("open", document.body, {
       command: "open",
       value: window.location.href,
     });
 
-    chrome.runtime.sendMessage({ action: "startRecording" }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.log("Background script error:", chrome.runtime.lastError);
-      }
-      addControlPanel();
-      startRecording();
-      sendResponse({ status: "Recording started" });
+    // After recording the open action, save to storage
+    openActionPromise.then(() => {
+      console.log('Open action recorded, saving to storage');
+      console.log('Recorded data now has', recordedData.length, 'steps');
+      
+      chrome.storage.local.set({
+        isRecording: true,
+        recordedData: recordedData,
+      }, () => {
+        console.log('Storage saved with', recordedData.length, 'steps');
+        
+        // Verify storage was saved correctly
+        chrome.storage.local.get(["recordedData"], (result) => {
+          console.log('Verification - Storage contains', result.recordedData?.length || 0, 'steps');
+        });
+      });
+
+      chrome.runtime.sendMessage({ action: "startRecording" }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.log("Background script error:", chrome.runtime.lastError);
+        }
+        addControlPanel();
+        startRecording();
+        sendResponse({ status: "Recording started", stepCount: recordedData.length });
+      });
+    }).catch(err => {
+      console.error('Error recording open action:', err);
+      sendResponse({ status: "Error", error: err.message });
     });
-    return true;
-  } else if (message.action === "resetStorage") {
+
+    return true; // Keep message channel open for async response
+  } 
+  else if (message.action === "resetStorage") {
     sessionStorage.clear();
     sendResponse({ status: "Storage cleared" });
-  } else if (message.action === "stopAndDownload") {
+  } 
+  else if (message.action === "stopAndDownload") {
     isRecording = false;
     chrome.storage.local.set({ isRecording: false, recordedData: [] });
     stopRecording();
     sendResponse({ status: "Recording stopped", data: recordedData });
-  } else if (message.action === "RESTORE_RECORDING") {
+  } 
+  else if (message.action === "RESTORE_RECORDING") {
+    console.log('=== RESTORE RECORDING ===');
     const status = message.data;
+    
     if (status && status.type === "RECORDING_STARTED") {
       isRecording = true;
       isTargetPage = true;
 
+      // Load recorded data from storage
       chrome.storage.local.get(["recordedData"], (result) => {
         recordedData = result.recordedData || [];
         console.log(`Restored recording with ${recordedData.length} steps after navigation`);
+        
+        // Debug: Check what's in the restored data
+        if (recordedData.length > 0) {
+          console.log('First step in restored data:', {
+            action: recordedData[0].action,
+            url: recordedData[0].url,
+            hasMetadata: !!recordedData[0]._metadata
+          });
+          
+          // If first step is not a goto/open action, add one
+          if (recordedData[0].action !== 'goto' && recordedData[0].action !== 'open') {
+            console.log('WARNING: First step is not a goto action! Adding one...');
+            const initialGoto = {
+              action: 'goto',
+              url: recordedData[0]?._metadata?.pageUrl || window.location.href,
+              _metadata: {
+                timestamp: new Date().toISOString(),
+                pageUrl: recordedData[0]?._metadata?.pageUrl || window.location.href,
+                originalCommand: 'open',
+                inserted: true
+              }
+            };
+            recordedData.unshift(initialGoto);
+            console.log('Added initial goto action:', initialGoto);
+            
+            // Save back to storage
+            chrome.storage.local.set({ recordedData: recordedData });
+          }
+        } else {
+          console.log('WARNING: No steps found in restored recording!');
+        }
 
         addControlPanel();
         startRecording();
       });
     }
     sendResponse({ status: "Restored" });
-  } else if (message.action === "API_CAPTURE_RESULT") {
+  } 
+  else if (message.action === "API_CAPTURE_RESULT") {
     console.log('API capture result received for action index:', message.actionIndex);
     console.log('Captured API:', {
       url: message.assertion?.target?.fullUrl,
@@ -116,12 +179,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleApiCaptureResult(message);
     sendResponse({ status: "processed" });
     return true;
-  } else if (message.action === "API_CAPTURE_TIMEOUT") {
+  } 
+  else if (message.action === "API_CAPTURE_TIMEOUT") {
     console.log('API capture timeout for action index:', message.actionIndex);
     handleApiCaptureTimeout(message);
     sendResponse({ status: "processed" });
     return true;
   }
+  
+  // Return true for async responses
+  return true;
 });
 
 function handleApiCaptureResult(message) {
@@ -186,7 +253,7 @@ function showApiCaptureSuccessNotification(assertion) {
     if (notification.parentNode) {
       notification.parentNode.removeChild(notification);
     }
-  }, 5000);
+  }, 1000);
 }
 
 function showApiCaptureTimeoutNotification() {
@@ -218,7 +285,7 @@ function showApiCaptureTimeoutNotification() {
     if (notification.parentNode) {
       notification.parentNode.removeChild(notification);
     }
-  }, 5000);
+  }, 3000);
 }
 
 // ============================================
@@ -650,14 +717,44 @@ function handleRightClick(e) {
 // ============================================
 
 function recordAction(type, element, data) {
-  const selector = getBestPlaywrightSelector(element);
-
+  console.log('=== recordAction === Type:', type, 'Command:', data.command, 'Value:', data.value);
+  
+  // Handle assertions first
   if (type === "assert" && data.type && ["elementText", "elementVisible", "elementClass", "elementValue"].includes(data.type)) {
     recordedData.push(data);
     if (isRecording) chrome.storage.local.set({ recordedData: recordedData });
     return Promise.resolve({ status: 'success' });
   }
 
+  // Special handling for "open" command
+  if (data.command === "open") {
+    console.log('Creating goto action for URL:', data.value);
+    
+    const gotoAction = {
+      action: "goto",
+      url: data.value,
+      _metadata: {
+        timestamp: new Date().toISOString(),
+        pageUrl: data.value,
+        originalCommand: "open",
+        elementInfo: undefined
+      }
+    };
+    
+    console.log('Goto action created:', gotoAction);
+    recordedData.push(gotoAction);
+    
+    if (isRecording) {
+      console.log('Saving to storage, total steps:', recordedData.length);
+      chrome.storage.local.set({ recordedData: recordedData });
+    }
+    
+    return Promise.resolve({ status: 'success' });
+  }
+
+  // For other commands
+  const selector = getBestPlaywrightSelector(element);
+  
   let action = {
     action: mapToPlaywrightAction(data.command, type),
     selector: selector
@@ -667,15 +764,11 @@ function recordAction(type, element, data) {
     action.value = data.value;
   }
 
-  if (data.command === "open") {
-    action = { action: "goto", url: data.value };
-  }
-
   if (data.command === "setInputFiles") {
     action = {
       action: "setInputFiles",
       selector: selector,
-      files: data.value, // Array of file names
+      files: data.value,
       fileCount: data.fileCount
     };
   }
@@ -692,10 +785,14 @@ function recordAction(type, element, data) {
     } : undefined
   };
 
+  console.log('Pushing action:', action);
   recordedData.push(action);
+  
   if (isRecording) {
+    console.log('Saving to storage, total steps:', recordedData.length);
     chrome.storage.local.set({ recordedData: recordedData });
   }
+  
   return Promise.resolve({ status: 'success' });
 }
 
@@ -1084,86 +1181,57 @@ function removeAssertionMenu() {
 // ============================================
 
 function transformStepsForExport(rawSteps) {
+   console.log('=== transformStepsForExport START ===');
+  console.log('Raw steps input:', rawSteps);
+  console.log('Number of raw steps:', rawSteps?.length || 0);
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return [];
-  
-  // Step 1: Clean the steps (your current implementation)
-  const cleanedSteps = rawSteps.map((step, index) => {
-    const cleanStep = JSON.parse(JSON.stringify(step));
+  const out = [];
 
-    // Clean up empty fields, but preserve duration for hover actions
-    const emptyFields = ['key', 'ms', 'to', 'from', 'value', 'timeout'];
-    emptyFields.forEach(field => {
-      if (cleanStep[field] === '' || cleanStep[field] === null || cleanStep[field] === undefined) {
-        delete cleanStep[field];
-      }
-    });
-
-    // Don't delete duration for hover actions
-    if (cleanStep.action !== 'hover' && (cleanStep.duration === '' || cleanStep.duration === null || cleanStep.duration === undefined)) {
-      delete cleanStep.duration;
-    }
-
-    // Clean metadata
-    if (cleanStep._metadata) {
-      Object.keys(cleanStep._metadata).forEach(key => {
-        if (cleanStep._metadata[key] === '' || cleanStep._metadata[key] === null || cleanStep._metadata[key] === undefined) {
-          delete cleanStep._metadata[key];
-        }
-      });
-
-      if (Object.keys(cleanStep._metadata).length === 0) {
-        delete cleanStep._metadata;
-      }
-    }
-
-    return cleanStep;
-  });
-
-  // Step 2: Add page navigation detection (your previous implementation)
-  const withNavigation = [];
-  
-  for (let i = 0; i < cleanedSteps.length; i++) {
-    const step = cleanedSteps[i];
-    const nextStep = cleanedSteps[i + 1];
+  for (let i = 0; i < rawSteps.length; i++) {
+    const step = rawSteps[i];
+    const nextStep = rawSteps[i + 1];
     
-    // Add current step
-    withNavigation.push(step);
-    
-    // Check for URL change
-    if (nextStep) {
+    // Clean step before adding
+    const cleanStep = cleanStepForExport(step);
+    out.push(cleanStep);
+
+    try {
       const curUrl = step?._metadata?.pageUrl;
       const nextUrl = nextStep?._metadata?.pageUrl;
-      
-      // Insert framework stabilization wait AFTER navigation / URL change
-      if (curUrl && nextUrl && curUrl !== nextUrl) {
-        withNavigation.push({
+
+      // Insert framework stabilization wait AFTER navigation / URL change.
+      if (nextStep && curUrl && nextUrl && curUrl !== nextUrl) {
+        out.push({
           action: 'goto',
           url: nextUrl,
           _metadata: { inserted: true, pageUrl: nextUrl }
         });
 
         // Single stabilization delay
-        withNavigation.push({
+        out.push({
           action: 'waitForTimeout',
           timeout: 500,
           _metadata: { inserted: true, purpose: 'framework-stabilization' }
         });
       }
-    }
+    } catch (err) { }
   }
 
-  // Step 3: Filter and deduplicate
+  console.log('Steps after adding waits:', out);
+
+  // Deduplicate
   const deduped = [];
-  const isSameAction = (a, b) => {
-    if (!a || !b) return false;
-    return a.action === b.action && 
-           a.selector === b.selector && 
-           a.url === b.url;
-  };
-  
-  for (let i = 0; i < withNavigation.length; i++) {
-    const cur = withNavigation[i];
+  for (let i = 0; i < out.length; i++) {
+    const cur = out[i];
     const prev = deduped.length ? deduped[deduped.length - 1] : null;
+    
+    // Helper function to check if actions are the same
+    const isSameAction = (a, b) => {
+      if (!a || !b) return false;
+      return a.action === b.action && 
+             a.selector === b.selector && 
+             a.url === b.url;
+    };
     
     if (!isSameAction(prev, cur)) {
       deduped.push(cur);
@@ -1173,20 +1241,62 @@ function transformStepsForExport(rawSteps) {
     }
   }
 
-  // Step 4: Final essential fields check
+  // Final essential fields check to ensure we have valid steps
   const finalSteps = deduped.filter(step => {
+    // A step is valid if:
+    // 1. It has an action
+    // 2. AND it has either a selector, url, or assertAfter
     const hasEssentialFields = step.action && (
       step.selector || 
       step.url || 
       step.assertAfter !== undefined
     );
 
+    // Also ensure it's not an empty object
     const hasContent = Object.keys(step).length > 0;
 
     return hasEssentialFields && hasContent;
   });
 
+  console.log('Final transformed steps:', finalSteps);
+  console.log('Number of final steps:', finalSteps.length);
+  console.log('=== transformStepsForExport END ===');
+
   return finalSteps;
+}
+
+function cleanStepForExport(step) {
+  if (!step) return step;
+  
+  const cleanStep = JSON.parse(JSON.stringify(step));
+  
+  // Clean up empty fields, but preserve duration for hover actions
+  const emptyFields = ['key', 'ms', 'to', 'from', 'value', 'timeout'];
+  emptyFields.forEach(field => {
+    if (cleanStep[field] === '' || cleanStep[field] === null || cleanStep[field] === undefined) {
+      delete cleanStep[field];
+    }
+  });
+
+  // Don't delete duration for hover actions
+  if (cleanStep.action !== 'hover' && (cleanStep.duration === '' || cleanStep.duration === null || cleanStep.duration === undefined)) {
+    delete cleanStep.duration;
+  }
+
+  // Clean metadata
+  if (cleanStep._metadata) {
+    Object.keys(cleanStep._metadata).forEach(key => {
+      if (cleanStep._metadata[key] === '' || cleanStep._metadata[key] === null || cleanStep._metadata[key] === undefined) {
+        delete cleanStep._metadata[key];
+      }
+    });
+
+    if (Object.keys(cleanStep._metadata).length === 0) {
+      delete cleanStep._metadata;
+    }
+  }
+
+  return cleanStep;
 }
 
 function generatePlaywrightScriptFromSteps(steps) {
@@ -1471,7 +1581,7 @@ function showApiCaptureNotification() {
     if (notification.parentNode) {
       notification.parentNode.removeChild(notification);
     }
-  }, 3000);
+  }, 1000);
 }
 
 window.__hiteman_fixSelectors = function (recording) {
