@@ -497,7 +497,7 @@ async function handleClick(e) {
   if (isShiftClick && savePromise) {
     console.log('Shift+Click detected - starting API capture');
     await savePromise;
-    
+
     const actionIndex = recordedData.length - 1;
     pendingApiAssertionIndex = actionIndex;
 
@@ -560,12 +560,21 @@ function handleChange(e) {
   if (element.tagName === "SELECT") {
     recordAction("select", element, { command: "selectOption", value: element.value });
   }
+  if (element.tagName === "INPUT" && element.type === "file") {
+    const files = Array.from(element.files).map(file => file.name);
+    recordAction("upload", element, {
+      command: "setInputFiles",
+      value: files,
+      fileCount: files.length
+    });
+  }
 }
 
 function handleInput(e) {
   if (!isRecording) return;
   const element = e.target;
   if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") return;
+  if (element.tagName === "INPUT" && element.type === "file") return;
 
   const type = (element.type || "").toLowerCase();
   const textLikeInputTypes = new Set(["text", "search", "email", "password", "tel", "url", "number"]);
@@ -582,6 +591,8 @@ function handleBlur(e) {
   const bufferKey = getUniqueElementKey(element);
   const tag = element.tagName;
   const textLikeInputTypes = new Set(['text', 'search', 'email', 'password', 'tel', 'url', 'number']);
+
+  if (element.tagName === "INPUT" && element.type === "file") return;
 
   if (inputBuffer[bufferKey] && (tag === 'TEXTAREA' || (tag === 'INPUT' && textLikeInputTypes.has((element.type || '').toLowerCase())))) {
     let selectorToUse = null;
@@ -660,6 +671,15 @@ function recordAction(type, element, data) {
     action = { action: "goto", url: data.value };
   }
 
+  if (data.command === "setInputFiles") {
+    action = {
+      action: "setInputFiles",
+      selector: selector,
+      files: data.value, // Array of file names
+      fileCount: data.fileCount
+    };
+  }
+
   action._metadata = {
     timestamp: new Date().toISOString(),
     pageUrl: window.location.href,
@@ -726,7 +746,9 @@ function mapToPlaywrightAction(command, type) {
     'uncheck': 'uncheck',
     'submit': 'click',
     'assertVisible': 'waitForSelector',
-    'hover': 'hover'
+    'hover': 'hover',
+    'setInputFiles': 'setInputFiles',
+    'upload': 'setInputFiles'
   };
   return actionMap[command] || 'click';
 }
@@ -1063,7 +1085,8 @@ function removeAssertionMenu() {
 
 function transformStepsForExport(rawSteps) {
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return [];
-
+  
+  // Step 1: Clean the steps (your current implementation)
   const cleanedSteps = rawSteps.map((step, index) => {
     const cleanStep = JSON.parse(JSON.stringify(step));
 
@@ -1096,20 +1119,71 @@ function transformStepsForExport(rawSteps) {
     return cleanStep;
   });
 
-  const finalSteps = cleanedSteps.filter(step => {
-    // Essential fields check - hover actions need action and selector
+  // Step 2: Add page navigation detection (your previous implementation)
+  const withNavigation = [];
+  
+  for (let i = 0; i < cleanedSteps.length; i++) {
+    const step = cleanedSteps[i];
+    const nextStep = cleanedSteps[i + 1];
+    
+    // Add current step
+    withNavigation.push(step);
+    
+    // Check for URL change
+    if (nextStep) {
+      const curUrl = step?._metadata?.pageUrl;
+      const nextUrl = nextStep?._metadata?.pageUrl;
+      
+      // Insert framework stabilization wait AFTER navigation / URL change
+      if (curUrl && nextUrl && curUrl !== nextUrl) {
+        withNavigation.push({
+          action: 'goto',
+          url: nextUrl,
+          _metadata: { inserted: true, pageUrl: nextUrl }
+        });
+
+        // Single stabilization delay
+        withNavigation.push({
+          action: 'waitForTimeout',
+          timeout: 500,
+          _metadata: { inserted: true, purpose: 'framework-stabilization' }
+        });
+      }
+    }
+  }
+
+  // Step 3: Filter and deduplicate
+  const deduped = [];
+  const isSameAction = (a, b) => {
+    if (!a || !b) return false;
+    return a.action === b.action && 
+           a.selector === b.selector && 
+           a.url === b.url;
+  };
+  
+  for (let i = 0; i < withNavigation.length; i++) {
+    const cur = withNavigation[i];
+    const prev = deduped.length ? deduped[deduped.length - 1] : null;
+    
+    if (!isSameAction(prev, cur)) {
+      deduped.push(cur);
+    } else if (prev && cur && cur._metadata) {
+      // Merge metadata if same action
+      prev._metadata = { ...prev._metadata, ...cur._metadata };
+    }
+  }
+
+  // Step 4: Final essential fields check
+  const finalSteps = deduped.filter(step => {
     const hasEssentialFields = step.action && (
-      step.selector || // For click, fill, hover, etc.
-      step.url || // For goto
-      step.assertAfter !== undefined // For assertions
+      step.selector || 
+      step.url || 
+      step.assertAfter !== undefined
     );
 
     const hasContent = Object.keys(step).length > 0;
 
-    if (!hasEssentialFields || !hasContent) {
-      return false;
-    }
-    return true;
+    return hasEssentialFields && hasContent;
   });
 
   return finalSteps;
