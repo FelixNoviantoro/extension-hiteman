@@ -484,7 +484,7 @@ function startRecording() {
   document.addEventListener("contextmenu", handleRightClick, true);
   document.addEventListener("change", handleChange, true);
   document.addEventListener("input", handleInput, true);
-  document.addEventListener("keyup", handleInput, true);
+  document.addEventListener("keyup", handleKeyup, true);
   document.addEventListener("blur", handleBlur, true);
   document.addEventListener("mouseover", handleHover, true);
   document.addEventListener("mouseout", handleMouseOut, true);
@@ -497,7 +497,7 @@ function stopRecording() {
   document.removeEventListener("contextmenu", handleRightClick, true);
   document.removeEventListener("change", handleChange, true);
   document.removeEventListener("input", handleInput, true);
-  document.removeEventListener("keyup", handleInput, true);
+  document.removeEventListener("keyup", handleKeyup, true);
   document.removeEventListener("blur", handleBlur, true);
   document.removeEventListener("mouseover", handleHover, true);
   document.removeEventListener("mouseout", handleMouseOut, true);
@@ -624,54 +624,133 @@ function handleMouseOut(e) {
 function handleChange(e) {
   if (!isRecording) return;
   const element = e.target;
+  
   if (element.tagName === "SELECT") {
     recordAction("select", element, { command: "selectOption", value: element.value });
   }
+  
   if (element.tagName === "INPUT" && element.type === "file") {
-    const files = Array.from(element.files).map(file => file.name);
-    recordAction("upload", element, {
-      command: "setInputFiles",
-      value: files,
-      fileCount: files.length
-    });
+    const files = Array.from(element.files);
+    
+    if (files.length === 0) {
+      recordAction("upload", element, {
+        command: "setInputFiles",
+        value: ""
+      });
+    } else {
+      // Get extensions only
+      const extensions = files.map(file => {
+        const name = file.name;
+        if (name.includes('.')) {
+          return name.split('.').pop().toLowerCase();
+        }
+        return 'file'; // fallback for files without extension
+      });
+      
+      // Join extensions (for single file, just the extension; for multiple, comma-separated)
+      const extensionString = extensions.join(', ');
+      
+      recordAction("upload", element, {
+        command: "setInputFiles",
+        value: extensionString
+      });
+    }
   }
 }
 
 function handleInput(e) {
   if (!isRecording) return;
   const element = e.target;
-  if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") return;
-  if (element.tagName === "INPUT" && element.type === "file") return;
+  
+  console.log('🔵 INPUT EVENT FIRED - Type:', e.type);
+  console.log('  Element:', {
+    tagName: element.tagName,
+    type: element.type,
+    id: element.id,
+    name: element.name,
+    className: element.className
+  });
+  console.log('  Value BEFORE:', element.value);
+  console.log('  Event type:', e.type);
+  console.log('  Timestamp:', Date.now());
+  
+  if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") {
+    console.log('  ⚠️ Not an input/textarea, skipping');
+    return;
+  }
+  if (element.tagName === "INPUT" && element.type === "file") {
+    console.log('  ⚠️ File input, skipping');
+    return;
+  }
 
   const type = (element.type || "").toLowerCase();
   const textLikeInputTypes = new Set(["text", "search", "email", "password", "tel", "url", "number"]);
 
   if (element.tagName === "TEXTAREA" || textLikeInputTypes.has(type)) {
     const key = getUniqueElementKey(element);
-    inputBuffer[key] = { element, value: element.value, timestamp: new Date() };
+    
+    // Use setTimeout to get value AFTER oninput handler runs
+    setTimeout(() => {
+      console.log('🟢 Delayed capture - Value:', element.value);
+      inputBuffer[key] = { 
+        element, 
+        value: element.value, 
+        timestamp: new Date(),
+        selector: getBestPlaywrightSelector(element)
+      };
+    }, 10); // Small delay
   }
 }
+
 
 function handleBlur(e) {
   if (!isRecording) return;
   const element = e.target;
+  
+  console.log('🔵 BLUR EVENT FIRED');
+  console.log('  Element:', {
+    tagName: element.tagName,
+    type: element.type,
+    id: element.id,
+    name: element.name,
+    value: element.value,
+    className: element.className
+  });
+  console.log('  Current value:', element.value);
+  
   const bufferKey = getUniqueElementKey(element);
+  console.log('  🔑 Looking for buffer with key:', bufferKey);
+  console.log('  📦 Buffer contents:', inputBuffer[bufferKey]);
+  
   const tag = element.tagName;
   const textLikeInputTypes = new Set(['text', 'search', 'email', 'password', 'tel', 'url', 'number']);
 
-  if (element.tagName === "INPUT" && element.type === "file") return;
+  if (element.tagName === "INPUT" && element.type === "file") {
+    console.log('  ⚠️ File input, skipping');
+    return;
+  }
 
   if (inputBuffer[bufferKey] && (tag === 'TEXTAREA' || (tag === 'INPUT' && textLikeInputTypes.has((element.type || '').toLowerCase())))) {
+    console.log('  ✅ Buffer found, processing...');
+    console.log('  📝 Buffer value:', inputBuffer[bufferKey].value);
+    console.log('  📝 Current element value:', element.value);
+    
     let selectorToUse = null;
     try {
       const lastAction = recordedData.length > 0 ? recordedData[recordedData.length - 1] : null;
       if (lastAction && lastAction.action === 'click' && lastAction.selector) {
         const matches = element.matches(lastAction.selector);
         if (matches) selectorToUse = lastAction.selector;
+        console.log('  🔍 Last action selector check:', matches ? 'Matched' : 'No match');
       }
-    } catch (err) { }
+    } catch (err) { 
+      console.log('  ❌ Error checking last action:', err.message);
+    }
 
-    if (!selectorToUse) selectorToUse = getBestPlaywrightSelector(element);
+    if (!selectorToUse) {
+      selectorToUse = getBestPlaywrightSelector(element);
+      console.log('  🔍 Generated new selector:', selectorToUse);
+    }
 
     const selector = selectorToUse;
     let action = {
@@ -692,12 +771,37 @@ function handleBlur(e) {
       }
     };
 
+    console.log('  💾 Recording action:', action);
     recordedData.push(action);
+    
     if (isRecording) {
       chrome.storage.local.set({ recordedData: recordedData });
+      console.log('  ✅ Saved to storage');
     }
+    
     delete inputBuffer[bufferKey];
+    console.log('  🗑️ Buffer cleared');
+  } else {
+    console.log('  ⚠️ No buffer found or not a text-like input');
+    console.log('  Has buffer?', !!inputBuffer[bufferKey]);
+    console.log('  Is text-like?', tag === 'TEXTAREA' || (tag === 'INPUT' && textLikeInputTypes.has((element.type || '').toLowerCase())));
   }
+}
+
+function handleKeyup(e) {
+  console.log('🔵 KEYUP EVENT FIRED');
+  console.log('  Element:', {
+    tagName: e.target.tagName,
+    type: e.target.type,
+    id: e.target.id,
+    name: e.target.name,
+    value: e.target.value
+  });
+  console.log('  Key:', e.key);
+  console.log('  Key code:', e.keyCode);
+  
+  // Then call your existing handleInput
+  handleInput(e);
 }
 
 function handleRightClick(e) {
@@ -760,30 +864,72 @@ function recordAction(type, element, data) {
     selector: selector
   };
 
-  if (data.value && shouldIncludeValue(data.command)) {
-    action.value = data.value;
-  }
-
+  // Handle file uploads specially
   if (data.command === "setInputFiles") {
     action = {
       action: "setInputFiles",
       selector: selector,
-      files: data.value,
-      fileCount: data.fileCount
+      // Put file name/extension in the value field
+      value: data.value || ""
+    };
+    
+    // Also store additional metadata about files
+    if (element.files && element.files.length > 0) {
+      const files = Array.from(element.files);
+      const fileInfo = files.map(file => ({
+        name: file.name,
+        extension: file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '',
+        type: file.type,
+        size: file.size
+      }));
+      
+      action._metadata = {
+        timestamp: new Date().toISOString(),
+        pageUrl: window.location.href,
+        originalCommand: data.command,
+        elementInfo: {
+          tagName: element.tagName,
+          id: element.id,
+          className: element.className,
+          text: element.textContent?.trim(),
+          value: element.value || '',
+          fileCount: files.length,
+          fileDetails: fileInfo
+        }
+      };
+    } else {
+      action._metadata = {
+        timestamp: new Date().toISOString(),
+        pageUrl: window.location.href,
+        originalCommand: data.command,
+        elementInfo: {
+          tagName: element.tagName,
+          id: element.id,
+          className: element.className,
+          text: element.textContent?.trim(),
+          value: element.value || '',
+          fileCount: 0
+        }
+      };
+    }
+  } else {
+    // Regular actions (fill, click, etc.)
+    if (data.value && shouldIncludeValue(data.command)) {
+      action.value = data.value;
+    }
+
+    action._metadata = {
+      timestamp: new Date().toISOString(),
+      pageUrl: window.location.href,
+      originalCommand: data.command,
+      elementInfo: data.command !== "open" ? {
+        tagName: element.tagName,
+        id: element.id,
+        className: element.className,
+        text: element.textContent?.trim()
+      } : undefined
     };
   }
-
-  action._metadata = {
-    timestamp: new Date().toISOString(),
-    pageUrl: window.location.href,
-    originalCommand: data.command,
-    elementInfo: data.command !== "open" ? {
-      tagName: element.tagName,
-      id: element.id,
-      className: element.className,
-      text: element.textContent?.trim()
-    } : undefined
-  };
 
   console.log('Pushing action:', action);
   recordedData.push(action);
@@ -1009,6 +1155,12 @@ function getBestPlaywrightSelector(element) {
 }
 
 function getUniqueElementKey(element) {
+  // Use formcontrolname if available (most reliable for Angular)
+  const formControlName = element.getAttribute('formcontrolname');
+  if (formControlName) {
+    return formControlName; // Simple and unique
+  }
+  
   return element.id || element.name || getXPath(element);
 }
 
@@ -1029,7 +1181,25 @@ function getXPath(element) {
     }
 
     let attributes = "";
-    if (current.className) attributes += `[@class="${current.className}"]`;
+    
+    // Only include stable, non-Angular classes
+    if (current.className) {
+      const stableClasses = current.className.split(' ')
+        .filter(cls => !cls.includes('ng-') && 
+                      !cls.includes('cdk-') && 
+                      !cls.includes('mat-') &&
+                      !cls.includes('touched') &&
+                      !cls.includes('pristine') &&
+                      !cls.includes('dirty') &&
+                      !cls.includes('valid') &&
+                      !cls.includes('invalid'))
+        .filter(cls => cls.trim());
+      
+      if (stableClasses.length > 0) {
+        attributes += `[@class="${stableClasses.join(' ')}"]`;
+      }
+    }
+    
     if (current.name) attributes += `[@name="${current.name}"]`;
 
     paths.unshift(`/${current.tagName.toLowerCase()}${attributes}[${index}]`);
