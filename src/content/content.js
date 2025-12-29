@@ -60,11 +60,11 @@ chrome.storage.local.get(["isRecording", "recordedData"], (result) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Content script received message:', message.action);
-  
+
   if (message.action === "startRecording") {
     console.log('=== START RECORDING ===');
     console.log('Current URL:', window.location.href);
-    
+
     isTargetPage = true;
     isRecording = true;
     recordedData = [];
@@ -81,13 +81,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     openActionPromise.then(() => {
       console.log('Open action recorded, saving to storage');
       console.log('Recorded data now has', recordedData.length, 'steps');
-      
+
       chrome.storage.local.set({
         isRecording: true,
         recordedData: recordedData,
       }, () => {
         console.log('Storage saved with', recordedData.length, 'steps');
-        
+
         // Verify storage was saved correctly
         chrome.storage.local.get(["recordedData"], (result) => {
           console.log('Verification - Storage contains', result.recordedData?.length || 0, 'steps');
@@ -108,21 +108,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
 
     return true; // Keep message channel open for async response
-  } 
+  }
   else if (message.action === "resetStorage") {
     sessionStorage.clear();
     sendResponse({ status: "Storage cleared" });
-  } 
+  }
   else if (message.action === "stopAndDownload") {
     isRecording = false;
     chrome.storage.local.set({ isRecording: false, recordedData: [] });
     stopRecording();
     sendResponse({ status: "Recording stopped", data: recordedData });
-  } 
+  }
   else if (message.action === "RESTORE_RECORDING") {
     console.log('=== RESTORE RECORDING ===');
     const status = message.data;
-    
+
     if (status && status.type === "RECORDING_STARTED") {
       isRecording = true;
       isTargetPage = true;
@@ -131,7 +131,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.storage.local.get(["recordedData"], (result) => {
         recordedData = result.recordedData || [];
         console.log(`Restored recording with ${recordedData.length} steps after navigation`);
-        
+
         // Debug: Check what's in the restored data
         if (recordedData.length > 0) {
           console.log('First step in restored data:', {
@@ -139,7 +139,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             url: recordedData[0].url,
             hasMetadata: !!recordedData[0]._metadata
           });
-          
+
           // If first step is not a goto/open action, add one
           if (recordedData[0].action !== 'goto' && recordedData[0].action !== 'open') {
             console.log('WARNING: First step is not a goto action! Adding one...');
@@ -155,7 +155,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             };
             recordedData.unshift(initialGoto);
             console.log('Added initial goto action:', initialGoto);
-            
+
             // Save back to storage
             chrome.storage.local.set({ recordedData: recordedData });
           }
@@ -168,7 +168,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
     sendResponse({ status: "Restored" });
-  } 
+  }
   else if (message.action === "API_CAPTURE_RESULT") {
     console.log('API capture result received for action index:', message.actionIndex);
     console.log('Captured API:', {
@@ -179,14 +179,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleApiCaptureResult(message);
     sendResponse({ status: "processed" });
     return true;
-  } 
+  }
   else if (message.action === "API_CAPTURE_TIMEOUT") {
     console.log('API capture timeout for action index:', message.actionIndex);
     handleApiCaptureTimeout(message);
     sendResponse({ status: "processed" });
     return true;
   }
-  
+
   // Return true for async responses
   return true;
 });
@@ -624,14 +624,14 @@ function handleMouseOut(e) {
 function handleChange(e) {
   if (!isRecording) return;
   const element = e.target;
-  
+
   if (element.tagName === "SELECT") {
     recordAction("select", element, { command: "selectOption", value: element.value });
   }
-  
+
   if (element.tagName === "INPUT" && element.type === "file") {
     const files = Array.from(element.files);
-    
+
     if (files.length === 0) {
       recordAction("upload", element, {
         command: "setInputFiles",
@@ -646,10 +646,10 @@ function handleChange(e) {
         }
         return 'file'; // fallback for files without extension
       });
-      
+
       // Join extensions (for single file, just the extension; for multiple, comma-separated)
       const extensionString = extensions.join(', ');
-      
+
       recordAction("upload", element, {
         command: "setInputFiles",
         value: extensionString
@@ -661,7 +661,7 @@ function handleChange(e) {
 function handleInput(e) {
   if (!isRecording) return;
   const element = e.target;
-  
+
   console.log('🔵 INPUT EVENT FIRED - Type:', e.type);
   console.log('  Element:', {
     tagName: element.tagName,
@@ -673,7 +673,7 @@ function handleInput(e) {
   console.log('  Value BEFORE:', element.value);
   console.log('  Event type:', e.type);
   console.log('  Timestamp:', Date.now());
-  
+
   if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") {
     console.log('  ⚠️ Not an input/textarea, skipping');
     return;
@@ -688,13 +688,13 @@ function handleInput(e) {
 
   if (element.tagName === "TEXTAREA" || textLikeInputTypes.has(type)) {
     const key = getUniqueElementKey(element);
-    
+
     // Use setTimeout to get value AFTER oninput handler runs
     setTimeout(() => {
       console.log('🟢 Delayed capture - Value:', element.value);
-      inputBuffer[key] = { 
-        element, 
-        value: element.value, 
+      inputBuffer[key] = {
+        element,
+        value: element.value,
         timestamp: new Date(),
         selector: getBestPlaywrightSelector(element)
       };
@@ -706,7 +706,7 @@ function handleInput(e) {
 function handleBlur(e) {
   if (!isRecording) return;
   const element = e.target;
-  
+
   console.log('🔵 BLUR EVENT FIRED');
   console.log('  Element:', {
     tagName: element.tagName,
@@ -717,11 +717,11 @@ function handleBlur(e) {
     className: element.className
   });
   console.log('  Current value:', element.value);
-  
+
   const bufferKey = getUniqueElementKey(element);
   console.log('  🔑 Looking for buffer with key:', bufferKey);
   console.log('  📦 Buffer contents:', inputBuffer[bufferKey]);
-  
+
   const tag = element.tagName;
   const textLikeInputTypes = new Set(['text', 'search', 'email', 'password', 'tel', 'url', 'number']);
 
@@ -734,7 +734,7 @@ function handleBlur(e) {
     console.log('  ✅ Buffer found, processing...');
     console.log('  📝 Buffer value:', inputBuffer[bufferKey].value);
     console.log('  📝 Current element value:', element.value);
-    
+
     let selectorToUse = null;
     try {
       const lastAction = recordedData.length > 0 ? recordedData[recordedData.length - 1] : null;
@@ -743,7 +743,7 @@ function handleBlur(e) {
         if (matches) selectorToUse = lastAction.selector;
         console.log('  🔍 Last action selector check:', matches ? 'Matched' : 'No match');
       }
-    } catch (err) { 
+    } catch (err) {
       console.log('  ❌ Error checking last action:', err.message);
     }
 
@@ -773,12 +773,12 @@ function handleBlur(e) {
 
     console.log('  💾 Recording action:', action);
     recordedData.push(action);
-    
+
     if (isRecording) {
       chrome.storage.local.set({ recordedData: recordedData });
       console.log('  ✅ Saved to storage');
     }
-    
+
     delete inputBuffer[bufferKey];
     console.log('  🗑️ Buffer cleared');
   } else {
@@ -799,7 +799,7 @@ function handleKeyup(e) {
   });
   console.log('  Key:', e.key);
   console.log('  Key code:', e.keyCode);
-  
+
   // Then call your existing handleInput
   handleInput(e);
 }
@@ -822,7 +822,7 @@ function handleRightClick(e) {
 
 function recordAction(type, element, data) {
   console.log('=== recordAction === Type:', type, 'Command:', data.command, 'Value:', data.value);
-  
+
   // Handle assertions first
   if (type === "assert" && data.type && ["elementText", "elementVisible", "elementClass", "elementValue"].includes(data.type)) {
     recordedData.push(data);
@@ -833,7 +833,7 @@ function recordAction(type, element, data) {
   // Special handling for "open" command
   if (data.command === "open") {
     console.log('Creating goto action for URL:', data.value);
-    
+
     const gotoAction = {
       action: "goto",
       url: data.value,
@@ -844,21 +844,21 @@ function recordAction(type, element, data) {
         elementInfo: undefined
       }
     };
-    
+
     console.log('Goto action created:', gotoAction);
     recordedData.push(gotoAction);
-    
+
     if (isRecording) {
       console.log('Saving to storage, total steps:', recordedData.length);
       chrome.storage.local.set({ recordedData: recordedData });
     }
-    
+
     return Promise.resolve({ status: 'success' });
   }
 
   // For other commands
   const selector = getBestPlaywrightSelector(element);
-  
+
   let action = {
     action: mapToPlaywrightAction(data.command, type),
     selector: selector
@@ -872,7 +872,7 @@ function recordAction(type, element, data) {
       // Put file name/extension in the value field
       value: data.value || ""
     };
-    
+
     // Also store additional metadata about files
     if (element.files && element.files.length > 0) {
       const files = Array.from(element.files);
@@ -882,7 +882,7 @@ function recordAction(type, element, data) {
         type: file.type,
         size: file.size
       }));
-      
+
       action._metadata = {
         timestamp: new Date().toISOString(),
         pageUrl: window.location.href,
@@ -933,12 +933,12 @@ function recordAction(type, element, data) {
 
   console.log('Pushing action:', action);
   recordedData.push(action);
-  
+
   if (isRecording) {
     console.log('Saving to storage, total steps:', recordedData.length);
     chrome.storage.local.set({ recordedData: recordedData });
   }
-  
+
   return Promise.resolve({ status: 'success' });
 }
 
@@ -1015,9 +1015,37 @@ function stripAngularClasses(selector) {
 }
 
 function getBestPlaywrightSelector(element) {
+  // Helper: check uniqueness, but handle Playwright pseudo :has-text("...") specially
   const isUnique = (sel) => {
     try {
-      return document.querySelectorAll(sel).length === 1;
+      // Match :has-text("...") and capture the inner string (handles escaped quotes)
+      const hasTextRegex = /:has-text\("((?:\\.|[^"\\])*)"\)/;
+      const m = sel.match(hasTextRegex);
+      if (m) {
+        // raw captured value (may contain backslash-escaped quotes)
+        let raw = m[1];
+        // Unescape \" -> ", \\ -> \
+        raw = raw.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+
+        // Remove the :has-text("...") part to obtain the CSS portion (may be empty)
+        const cssPart = sel.replace(hasTextRegex, "").trim();
+
+        // If cssPart is empty -> consider all elements
+        const candidates = cssPart ? Array.from(document.querySelectorAll(cssPart)) : Array.from(document.querySelectorAll("*"));
+
+        // Normalize whitespace similar to textOf()
+        const norm = (el) => (el.textContent || "").trim().replace(/\s+/g, " ");
+
+        const count = candidates.filter(el => {
+          const t = norm(el);
+          return t === raw || t.includes(raw);
+        }).length;
+
+        return count === 1;
+      } else {
+        // No Playwright pseudo — safe to pass to querySelectorAll
+        return document.querySelectorAll(sel).length === 1;
+      }
     } catch (_) {
       return false;
     }
@@ -1043,6 +1071,40 @@ function getBestPlaywrightSelector(element) {
     });
   };
 
+  // Helper: Get implicit ARIA role
+  const getImplicitRole = (el) => {
+    const tag = el.tagName.toLowerCase();
+    const type = el.type || '';
+
+    if (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset'].includes(type))) {
+      return 'button';
+    }
+    if (tag === 'a' && el.hasAttribute('href')) {
+      return 'link';
+    }
+    if (tag === 'input' && type === 'checkbox') {
+      return 'checkbox';
+    }
+    if (tag === 'input' && type === 'radio') {
+      return 'radio';
+    }
+    if (tag === 'input' && ['text', 'search', 'email', 'tel', 'url', 'password'].includes(type)) {
+      return 'textbox';
+    }
+    if (tag === 'textarea') {
+      return 'textbox';
+    }
+    if (tag === 'select') {
+      return 'combobox';
+    }
+    if (tag === 'header') return 'banner';
+    if (tag === 'footer') return 'contentinfo';
+    if (tag === 'nav') return 'navigation';
+    if (tag === 'main') return 'main';
+
+    return null;
+  };
+
   const iconTags = ["SVG", "PATH", "I", "SPAN"];
   if (iconTags.includes(element.tagName)) {
     let p = element.parentElement;
@@ -1057,8 +1119,12 @@ function getBestPlaywrightSelector(element) {
 
   const tag = element.tagName.toLowerCase();
 
+  // ========== PRIORITY 1: UNIQUE IDENTIFIERS ==========
+
+  // 1. Test attributes (data-testid, data-cy, etc.) - Most stable for testing
   if (element.dataset) {
-    for (const k of ["testid", "qa", "cy"]) {
+    const testAttrs = ["testid", "qa", "cy", "test", "e2e", "id", "qa-id", "test-id"];
+    for (const k of testAttrs) {
       if (element.dataset[k]) {
         const sel = `[data-${k}="${escape(element.dataset[k])}"]`;
         if (isUnique(sel)) return clean(sel);
@@ -1066,58 +1132,153 @@ function getBestPlaywrightSelector(element) {
     }
   }
 
-  if (element.id && !/^[0-9]/.test(element.id)) {
+  // 2. Form control names (very stable for Angular/React forms)
+  const formControlName = element.getAttribute("formcontrolname");
+  if (formControlName) {
+    const sel = `[formcontrolname="${escape(formControlName)}"]`;
+    if (isUnique(sel)) return clean(sel);
+  }
+
+  // 3. Standard HTML ID (if meaningful)
+  if (element.id && !/^[0-9]/.test(element.id) && !/^(comp-|ext-|gen-|random-)/i.test(element.id)) {
     const sel = `#${escape(element.id)}`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  if (tag === "input" || tag === "textarea" || tag === "select") {
-    if (element.name) {
-      const sel = `[name="${escape(element.name)}"]`;
-      if (isUnique(sel)) return clean(sel);
-    }
-
-    if (element.placeholder) {
-      const sel = `[placeholder="${escape(element.placeholder)}"]`;
-      if (isUnique(sel)) return clean(sel);
-    }
+  // 4. Input/select name attribute
+  if ((tag === "input" || tag === "textarea" || tag === "select") && element.name) {
+    const sel = `[name="${escape(element.name)}"]`;
+    if (isUnique(sel)) return clean(sel);
   }
 
+  // ========== PRIORITY 2: TEXT-BASED SELECTORS ==========
+
+  // 5. Button/link with unique text (most reliable for buttons)
   if (["button", "a"].includes(tag)) {
-    if (visibleText && visibleText.length <= 40) {
-      const all = Array.from(document.querySelectorAll(tag));
-      const match = all.filter(el => textOf(el) === visibleText);
-      if (match.length === 1) {
+    if (visibleText && visibleText.length <= 100 && visibleText.length > 0) {
+      // Check if this text is unique among same tag elements
+      const allSameTag = Array.from(document.querySelectorAll(tag));
+      const sameTextCount = allSameTag.filter(el =>
+        textOf(el) === visibleText ||
+        (el.textContent || "").trim().includes(visibleText)
+      ).length;
+
+      if (sameTextCount === 1) {
+        // Use Playwright :has-text for buttons/links with unique text
         return `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
+      }
+
+      // If not unique, try with more specific selector combining with parent/ancestor
+      const parentClasses = element.parentElement ?
+        Array.from(element.parentElement.classList).filter(c => !/(ng-|cdk-|mat-)/.test(c)) : [];
+
+      if (parentClasses.length > 0) {
+        const sel = `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
+        // isUnique knows how to handle :has-text
+        if (isUnique(sel)) return clean(sel);
       }
     }
   }
 
-  const title = element.getAttribute("title");
-  if (title) {
-    const sel = `${tag}[title="${escape(title)}"]`;
+  // 6. Label text for form elements
+  if (tag === "input" || tag === "textarea" || tag === "select") {
+    if (element.id) {
+      const label = document.querySelector(`label[for="${element.id}"]`);
+      if (label) {
+        const labelText = textOf(label);
+        if (labelText && labelText.length <= 100) {
+          const sel = `#${escape(element.id)}`;
+          if (isUnique(sel)) return clean(sel);
+        }
+      }
+    }
+  }
+
+  // 7. Placeholder text for inputs
+  if (element.placeholder && (tag === "input" || tag === "textarea")) {
+    const sel = `[placeholder="${escape(element.placeholder)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
+  // ========== PRIORITY 3: ARIA & ACCESSIBILITY ==========
+
+  // 8. Aria-label (specific accessible name)
   const ariaLabel = element.getAttribute("aria-label");
-  if (ariaLabel) {
+  if (ariaLabel && ariaLabel.length <= 100) {
     const sel = `[aria-label="${escape(ariaLabel)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
+  // 9. Explicit role attribute WITH additional specificity
+  const role = element.getAttribute("role");
+  if (role) {
+    // For buttons with role, try to combine with other attributes
+    if (role === "button") {
+      // Try role + text
+      if (visibleText && visibleText.length <= 100) {
+        const sel = `[role="button"]:has-text("${visibleText.replace(/"/g, '\\"')}")`;
+        if (isUnique(sel)) return clean(sel);
+      }
+
+      // Try role + aria-label
+      if (ariaLabel) {
+        const sel = `[role="button"][aria-label="${escape(ariaLabel)}"]`;
+        if (isUnique(sel)) return clean(sel);
+      }
+
+      // Try role + classes
+      const goodClasses = getMeaningfulClasses(element);
+      if (goodClasses.length > 0) {
+        const sel = `[role="button"].${goodClasses.map(escape).join(".")}`;
+        if (isUnique(sel)) return clean(sel);
+      }
+    }
+
+    // Generic role selector (only if unique)
+    const sel = `[role="${escape(role)}"]`;
+    if (isUnique(sel)) return clean(sel);
+  }
+
+  // 10. Implicit ARIA role (for elements without explicit role)
+  const implicitRole = getImplicitRole(element);
+  if (implicitRole && !role) {
+    // Similar approach as explicit role
+    if (implicitRole === "button") {
+      if (visibleText && visibleText.length <= 100) {
+        const sel = `button:has-text("${visibleText.replace(/"/g, '\\"')}")`;
+        if (isUnique(sel)) return clean(sel);
+      }
+    }
+  }
+
+  // ========== PRIORITY 4: CLASSES & ATTRIBUTES ==========
+
+  // 11. Meaningful CSS classes
   const goodClasses = getMeaningfulClasses(element);
   if (goodClasses.length) {
     const sel = `${tag}.${goodClasses.map(escape).join(".")}`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  const role = element.getAttribute("role");
-  if (role) {
-    const sel = `[role="${escape(role)}"]`;
+  // 12. Title attribute
+  const title = element.getAttribute("title");
+  if (title) {
+    const sel = `${tag}[title="${escape(title)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
+  // 13. Type attribute for inputs
+  if (tag === "input" && element.type) {
+    const sel = `input[type="${escape(element.type)}"]`;
+    const allWithType = document.querySelectorAll(sel);
+    if (allWithType.length === 1) return clean(sel);
+  }
+
+  // ========== PRIORITY 5: STRUCTURAL SELECTORS ==========
+
+  // 14. Sibling position (nth-of-type) with parent
   if (element.parentElement) {
+    const parentTag = element.parentElement.tagName.toLowerCase();
     const siblings = Array.from(element.parentElement.children)
       .filter(n => n.tagName.toLowerCase() === tag);
 
@@ -1126,8 +1287,49 @@ function getBestPlaywrightSelector(element) {
       const sel = `${tag}:nth-of-type(${idx})`;
       if (isUnique(sel)) return clean(sel);
     }
+
+    // Try with parent selector
+    if (element.parentElement.id) {
+      const sel = `#${escape(element.parentElement.id)} > ${tag}`;
+      if (isUnique(sel)) return clean(sel);
+    }
   }
 
+  // 15. Data attributes (generic)
+  const dataAttrs = Array.from(element.attributes)
+    .filter(attr => attr.name.startsWith('data-') && !attr.name.startsWith('data-test'));
+
+  for (const attr of dataAttrs) {
+    const sel = `[${attr.name}="${escape(attr.value)}"]`;
+    if (isUnique(sel)) return clean(sel);
+  }
+
+  // ========== FALLBACK: COMBINED SELECTORS ==========
+
+  // 16. Try combining multiple attributes
+  const attributes = [];
+  if (tag) attributes.push(tag);
+  if (element.id) attributes.push(`#${escape(element.id)}`);
+
+  // Add classes if they exist
+  const allClasses = Array.from(element.classList || [])
+    .filter(c => !/(ng-|cdk-|mat-)/.test(c));
+
+  if (allClasses.length > 0) {
+    attributes.push(`.${allClasses.map(escape).join('.')}`);
+  }
+
+  // Add other attributes
+  if (element.type) attributes.push(`[type="${escape(element.type)}"]`);
+  if (element.name) attributes.push(`[name="${escape(element.name)}"]`);
+  if (role) attributes.push(`[role="${escape(role)}"]`);
+
+  const combinedSel = attributes.join('');
+  if (combinedSel && isUnique(combinedSel)) return clean(combinedSel);
+
+  // ========== FINAL FALLBACK: XPATH ==========
+
+  // 17. XPath as last resort
   return `xpath=${getXPath(element)}`;
 
   function getXPath(el) {
@@ -1154,13 +1356,14 @@ function getBestPlaywrightSelector(element) {
   }
 }
 
+
 function getUniqueElementKey(element) {
   // Use formcontrolname if available (most reliable for Angular)
   const formControlName = element.getAttribute('formcontrolname');
   if (formControlName) {
     return formControlName; // Simple and unique
   }
-  
+
   return element.id || element.name || getXPath(element);
 }
 
@@ -1181,25 +1384,25 @@ function getXPath(element) {
     }
 
     let attributes = "";
-    
+
     // Only include stable, non-Angular classes
     if (current.className) {
       const stableClasses = current.className.split(' ')
-        .filter(cls => !cls.includes('ng-') && 
-                      !cls.includes('cdk-') && 
-                      !cls.includes('mat-') &&
-                      !cls.includes('touched') &&
-                      !cls.includes('pristine') &&
-                      !cls.includes('dirty') &&
-                      !cls.includes('valid') &&
-                      !cls.includes('invalid'))
+        .filter(cls => !cls.includes('ng-') &&
+          !cls.includes('cdk-') &&
+          !cls.includes('mat-') &&
+          !cls.includes('touched') &&
+          !cls.includes('pristine') &&
+          !cls.includes('dirty') &&
+          !cls.includes('valid') &&
+          !cls.includes('invalid'))
         .filter(cls => cls.trim());
-      
+
       if (stableClasses.length > 0) {
         attributes += `[@class="${stableClasses.join(' ')}"]`;
       }
     }
-    
+
     if (current.name) attributes += `[@name="${current.name}"]`;
 
     paths.unshift(`/${current.tagName.toLowerCase()}${attributes}[${index}]`);
@@ -1351,7 +1554,7 @@ function removeAssertionMenu() {
 // ============================================
 
 function transformStepsForExport(rawSteps) {
-   console.log('=== transformStepsForExport START ===');
+  console.log('=== transformStepsForExport START ===');
   console.log('Raw steps input:', rawSteps);
   console.log('Number of raw steps:', rawSteps?.length || 0);
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return [];
@@ -1360,31 +1563,31 @@ function transformStepsForExport(rawSteps) {
   for (let i = 0; i < rawSteps.length; i++) {
     const step = rawSteps[i];
     const nextStep = rawSteps[i + 1];
-    
+
     // Clean step before adding
     const cleanStep = cleanStepForExport(step);
     out.push(cleanStep);
 
-    try {
-      const curUrl = step?._metadata?.pageUrl;
-      const nextUrl = nextStep?._metadata?.pageUrl;
+    // try {
+    //   const curUrl = step?._metadata?.pageUrl;
+    //   const nextUrl = nextStep?._metadata?.pageUrl;
 
-      // Insert framework stabilization wait AFTER navigation / URL change.
-      if (nextStep && curUrl && nextUrl && curUrl !== nextUrl) {
-        out.push({
-          action: 'goto',
-          url: nextUrl,
-          _metadata: { inserted: true, pageUrl: nextUrl }
-        });
+    //   // Insert framework stabilization wait AFTER navigation / URL change.
+    //   if (nextStep && curUrl && nextUrl && curUrl !== nextUrl) {
+    //     out.push({
+    //       action: 'goto',
+    //       url: nextUrl,
+    //       _metadata: { inserted: true, pageUrl: nextUrl }
+    //     });
 
-        // Single stabilization delay
-        out.push({
-          action: 'waitForTimeout',
-          timeout: 500,
-          _metadata: { inserted: true, purpose: 'framework-stabilization' }
-        });
-      }
-    } catch (err) { }
+    //     // Single stabilization delay
+    //     out.push({
+    //       action: 'waitForTimeout',
+    //       timeout: 500,
+    //       _metadata: { inserted: true, purpose: 'framework-stabilization' }
+    //     });
+    //   }
+    // } catch (err) { }
   }
 
   console.log('Steps after adding waits:', out);
@@ -1394,15 +1597,15 @@ function transformStepsForExport(rawSteps) {
   for (let i = 0; i < out.length; i++) {
     const cur = out[i];
     const prev = deduped.length ? deduped[deduped.length - 1] : null;
-    
+
     // Helper function to check if actions are the same
     const isSameAction = (a, b) => {
       if (!a || !b) return false;
-      return a.action === b.action && 
-             a.selector === b.selector && 
-             a.url === b.url;
+      return a.action === b.action &&
+        a.selector === b.selector &&
+        a.url === b.url;
     };
-    
+
     if (!isSameAction(prev, cur)) {
       deduped.push(cur);
     } else if (prev && cur && cur._metadata) {
@@ -1417,8 +1620,8 @@ function transformStepsForExport(rawSteps) {
     // 1. It has an action
     // 2. AND it has either a selector, url, or assertAfter
     const hasEssentialFields = step.action && (
-      step.selector || 
-      step.url || 
+      step.selector ||
+      step.url ||
       step.assertAfter !== undefined
     );
 
@@ -1437,9 +1640,9 @@ function transformStepsForExport(rawSteps) {
 
 function cleanStepForExport(step) {
   if (!step) return step;
-  
+
   const cleanStep = JSON.parse(JSON.stringify(step));
-  
+
   // Clean up empty fields, but preserve duration for hover actions
   const emptyFields = ['key', 'ms', 'to', 'from', 'value', 'timeout'];
   emptyFields.forEach(field => {
