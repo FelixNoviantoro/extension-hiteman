@@ -406,6 +406,24 @@ async function handleStopButton() {
     // Force sync with storage to get the latest data
     await syncWithStorage();
 
+    if (recordedData && recordedData.length > 0) {
+      const firstAction = recordedData[0].action;
+      if (firstAction !== 'goto' && firstAction !== 'open') {
+        console.log('Adding missing initial goto action before export');
+        const initialGoto = {
+          action: 'goto',
+          url: recordedData[0]?._metadata?.pageUrl || window.location.href,
+          _metadata: {
+            timestamp: new Date().toISOString(),
+            pageUrl: recordedData[0]?._metadata?.pageUrl || window.location.href,
+            originalCommand: 'open',
+            inserted: true
+          }
+        };
+        recordedData.unshift(initialGoto);
+      }
+    }
+
     const stepsWithWaits = transformStepsForExport(recordedData || []);
 
     const recordingData = {
@@ -481,7 +499,7 @@ function updateUIAfterStop() {
 
 function startRecording() {
   document.addEventListener("click", handleClick, true);
-  document.addEventListener("contextmenu", handleRightClick, true);
+  // document.addEventListener("contextmenu", handleRightClick, true);
   document.addEventListener("change", handleChange, true);
   document.addEventListener("input", handleInput, true);
   document.addEventListener("keyup", handleKeyup, true);
@@ -494,7 +512,7 @@ function startRecording() {
 
 function stopRecording() {
   document.removeEventListener("click", handleClick, true);
-  document.removeEventListener("contextmenu", handleRightClick, true);
+  // document.removeEventListener("contextmenu", handleRightClick, true);
   document.removeEventListener("change", handleChange, true);
   document.removeEventListener("input", handleInput, true);
   document.removeEventListener("keyup", handleKeyup, true);
@@ -1015,38 +1033,37 @@ function stripAngularClasses(selector) {
 }
 
 function getBestPlaywrightSelector(element) {
-  // Helper: check uniqueness, but handle Playwright pseudo :has-text("...") specially
+  // =========================
+  // Helpers
+  // =========================
+
   const isUnique = (sel) => {
     try {
-      // Match :has-text("...") and capture the inner string (handles escaped quotes)
       const hasTextRegex = /:has-text\("((?:\\.|[^"\\])*)"\)/;
       const m = sel.match(hasTextRegex);
+
       if (m) {
-        // raw captured value (may contain backslash-escaped quotes)
         let raw = m[1];
-        // Unescape \" -> ", \\ -> \
         raw = raw.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
 
-        // Remove the :has-text("...") part to obtain the CSS portion (may be empty)
         const cssPart = sel.replace(hasTextRegex, "").trim();
+        const candidates = cssPart
+          ? Array.from(document.querySelectorAll(cssPart))
+          : Array.from(document.querySelectorAll("*"));
 
-        // If cssPart is empty -> consider all elements
-        const candidates = cssPart ? Array.from(document.querySelectorAll(cssPart)) : Array.from(document.querySelectorAll("*"));
+        const norm = (el) =>
+          (el.textContent || "").trim().replace(/\s+/g, " ");
 
-        // Normalize whitespace similar to textOf()
-        const norm = (el) => (el.textContent || "").trim().replace(/\s+/g, " ");
-
-        const count = candidates.filter(el => {
+        const count = candidates.filter((el) => {
           const t = norm(el);
           return t === raw || t.includes(raw);
         }).length;
 
         return count === 1;
-      } else {
-        // No Playwright pseudo — safe to pass to querySelectorAll
-        return document.querySelectorAll(sel).length === 1;
       }
-    } catch (_) {
+
+      return document.querySelectorAll(sel).length === 1;
+    } catch {
       return false;
     }
   };
@@ -1054,77 +1071,172 @@ function getBestPlaywrightSelector(element) {
   const clean = (selector) =>
     selector.replace(/(ng-|cdk-|mat-|_ngcontent)[^\s"'=]*/g, "");
 
-  const textOf = (el) =>
-    el.textContent?.trim().replace(/\s+/g, " ") || "";
-
-  const visibleText = textOf(element);
+  const textOf = (el) => {
+    // Only get text content that's directly in the element, not from attributes
+    const text = el.textContent?.trim().replace(/\s+/g, " ") || "";
+    
+    // Check if this text looks like it might be from a tooltip attribute
+    // by comparing with tooltip attributes of child elements
+    const hasTooltipChild = el.querySelector('[ngbtooltip], [title], [aria-label]');
+    if (hasTooltipChild) {
+      // Get tooltip text from child elements
+      const tooltipText = hasTooltipChild.getAttribute('ngbtooltip') || 
+                         hasTooltipChild.getAttribute('title') || 
+                         hasTooltipChild.getAttribute('aria-label') || "";
+      
+      // If the element's text content matches or contains the tooltip text, return empty
+      if (tooltipText && text.includes(tooltipText)) {
+        return "";
+      }
+    }
+    
+    return text;
+  };
 
   const escape = CSS.escape;
 
+  const isLikelyGeneratedId = (id) =>
+    /^[a-f0-9]{8,}(-\d+)?$/i.test(id) ||
+    /^pn_id_\d+$/i.test(id) ||
+    /^DataTables_Table_\d+_?(next|previous|first|last)?$/i.test(id);
+
   const getMeaningfulClasses = (el) => {
     if (!el.classList) return [];
-    return Array.from(el.classList).filter(cls => {
-      return !(
-        /^(p-|m-|gap-|grid-|flex-|rounded|w-|h-|text-|hover:|active:|focus:)/.test(cls) ||
-        /(ng-|cdk-|mat-|_ngcontent)/.test(cls)
-      );
-    });
+    return Array.from(el.classList).filter(
+      (cls) =>
+        !/^(p-|m-|gap-|grid-|flex-|rounded|w-|h-|text-|hover:|active:|focus:)/.test(
+          cls
+        ) &&
+        !/(ng-|cdk-|mat-|_ngcontent)/.test(cls)
+    );
   };
 
-  // Helper: Get implicit ARIA role
   const getImplicitRole = (el) => {
     const tag = el.tagName.toLowerCase();
-    const type = el.type || '';
+    const type = el.type || "";
 
-    if (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset'].includes(type))) {
-      return 'button';
-    }
-    if (tag === 'a' && el.hasAttribute('href')) {
-      return 'link';
-    }
-    if (tag === 'input' && type === 'checkbox') {
-      return 'checkbox';
-    }
-    if (tag === 'input' && type === 'radio') {
-      return 'radio';
-    }
-    if (tag === 'input' && ['text', 'search', 'email', 'tel', 'url', 'password'].includes(type)) {
-      return 'textbox';
-    }
-    if (tag === 'textarea') {
-      return 'textbox';
-    }
-    if (tag === 'select') {
-      return 'combobox';
-    }
-    if (tag === 'header') return 'banner';
-    if (tag === 'footer') return 'contentinfo';
-    if (tag === 'nav') return 'navigation';
-    if (tag === 'main') return 'main';
-
+    if (tag === "button") return "button";
+    if (tag === "a" && el.hasAttribute("href")) return "link";
+    if (tag === "input" && type === "checkbox") return "checkbox";
+    if (tag === "input" && type === "radio") return "radio";
+    if (
+      tag === "input" &&
+      ["text", "search", "email", "tel", "url", "password"].includes(type)
+    )
+      return "textbox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "select") return "combobox";
     return null;
   };
 
-  const iconTags = ["SVG", "PATH", "I", "SPAN"];
-  if (iconTags.includes(element.tagName)) {
-    let p = element.parentElement;
-    while (p && p !== document.body) {
-      if (["BUTTON", "A"].includes(p.tagName) || p.getAttribute("role") === "button") {
-        element = p;
-        break;
-      }
-      p = p.parentElement;
+  // =========================
+  // Clickable normalization
+  // =========================
+
+  const iconTags = [
+    "SVG",
+    "PATH",
+    "LINE",
+    "RECT",
+    "CIRCLE",
+    "POLYLINE",
+    "POLYGON",
+    "G",
+    "I",
+    "SPAN",
+  ];
+
+  if (iconTags.includes(element.tagName.toUpperCase())) {
+    const clickableAncestor = element.closest(
+      'button, a[href], [role="button"], [role="combobox"]'
+    );
+    if (clickableAncestor) element = clickableAncestor;
+  }
+
+  const isNaturallyClickable = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (["button", "a", "input", "textarea", "select"].includes(tag))
+      return true;
+    if (
+      el.hasAttribute("role") &&
+      ["button", "link", "combobox"].includes(el.getAttribute("role"))
+    )
+      return true;
+    if (el.hasAttribute("tabindex") && el.getAttribute("tabindex") !== "-1")
+      return true;
+    return false;
+  };
+
+  if (!isNaturallyClickable(element)) {
+    const interactiveChild = element.querySelector(
+      'button, a[href], input, textarea, select, [role="button"], [role="combobox"], [contenteditable="true"], [tabindex]:not([tabindex="-1"])'
+    );
+    if (interactiveChild) element = interactiveChild;
+  }
+
+  // =========================
+  // DROPDOWN NORMALIZATION (CRITICAL FIX)
+  // =========================
+
+  const dropdownSelectors = [
+    'p-dropdown',
+    'mat-select',
+    'ng-select',
+    'p-multiselect',
+    '[class*="dropdown"][formcontrolname]',
+    '[class*="select"][formcontrolname]'
+  ];
+
+  // Check if we're inside a dropdown component
+  let dropdownContainer = null;
+  for (const selector of dropdownSelectors) {
+    dropdownContainer = element.closest(selector);
+    if (dropdownContainer) break;
+  }
+
+  // Store original element for potential use
+  let originalElement = element;
+
+  // If we're inside a dropdown and clicked on an internal element
+  if (dropdownContainer) {
+    const currentRole = element.getAttribute('role');
+    const currentTag = element.tagName.toLowerCase();
+    const currentAriaLabel = element.getAttribute('aria-label');
+
+    // If clicked on internal trigger button, combobox span, or icon
+    const isInternalElement = (
+      (currentRole === 'button' && currentAriaLabel?.toLowerCase().includes('trigger')) ||
+      (currentRole === 'combobox' && currentTag === 'span') ||
+      currentTag === 'svg' ||
+      currentTag === 'path' ||
+      element.classList.contains('p-select-dropdown') ||
+      element.classList.contains('p-dropdown-trigger')
+    );
+
+    if (isInternalElement) {
+      // Use the dropdown container instead
+      element = dropdownContainer;
     }
   }
 
   const tag = element.tagName.toLowerCase();
+  const visibleText = textOf(element);
+  const role = element.getAttribute("role");
 
-  // ========== PRIORITY 1: UNIQUE IDENTIFIERS ==========
+  // =========================
+  // PRIORITY 1: Stable IDs & Form Controls
+  // =========================
 
-  // 1. Test attributes (data-testid, data-cy, etc.) - Most stable for testing
   if (element.dataset) {
-    const testAttrs = ["testid", "qa", "cy", "test", "e2e", "id", "qa-id", "test-id"];
-    for (const k of testAttrs) {
+    for (const k of [
+      "testid",
+      "qa",
+      "cy",
+      "test",
+      "e2e",
+      "qa-id",
+      "test-id",
+    ]) {
       if (element.dataset[k]) {
         const sel = `[data-${k}="${escape(element.dataset[k])}"]`;
         if (isUnique(sel)) return clean(sel);
@@ -1132,227 +1244,186 @@ function getBestPlaywrightSelector(element) {
     }
   }
 
-  // 2. Form control names (very stable for Angular/React forms)
+  // HIGH PRIORITY: formcontrolname for form elements
   const formControlName = element.getAttribute("formcontrolname");
   if (formControlName) {
     const sel = `[formcontrolname="${escape(formControlName)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // 3. Standard HTML ID (if meaningful)
-  if (element.id && !/^[0-9]/.test(element.id) && !/^(comp-|ext-|gen-|random-)/i.test(element.id)) {
+  // Check for name attribute on form controls
+  const name = element.getAttribute("name");
+  if (name && ['input', 'select', 'textarea'].includes(tag)) {
+    const sel = `${tag}[name="${escape(name)}"]`;
+    if (isUnique(sel)) return clean(sel);
+  }
+
+  if (
+    element.id &&
+    !isLikelyGeneratedId(element.id) &&
+    role !== "option" &&
+    !element.closest("ng-dropdown-panel")
+  ) {
     const sel = `#${escape(element.id)}`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // 4. Input/select name attribute
-  if ((tag === "input" || tag === "textarea" || tag === "select") && element.name) {
-    const sel = `[name="${escape(element.name)}"]`;
+  // =========================
+  // PRIORITY 2: Placeholder for custom dropdowns
+  // =========================
+
+  if (element.hasAttribute('placeholder')) {
+    const placeholder = element.getAttribute('placeholder');
+    // Try tag + placeholder
+    const sel1 = `${tag}[placeholder="${escape(placeholder)}"]`;
+    if (isUnique(sel1)) return clean(sel1);
+
+    // Try just placeholder if unique
+    const sel2 = `[placeholder="${escape(placeholder)}"]`;
+    if (isUnique(sel2)) return clean(sel2);
+  }
+
+  // =========================
+  // PRIORITY 3: Text
+  // =========================
+
+  if (["button", "a"].includes(tag) && visibleText) {
+    const sel = `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ========== PRIORITY 2: TEXT-BASED SELECTORS ==========
-
-  // 5. Button/link with unique text (most reliable for buttons)
-  if (["button", "a"].includes(tag)) {
-    if (visibleText && visibleText.length <= 100 && visibleText.length > 0) {
-      // Check if this text is unique among same tag elements
-      const allSameTag = Array.from(document.querySelectorAll(tag));
-      const sameTextCount = allSameTag.filter(el =>
-        textOf(el) === visibleText ||
-        (el.textContent || "").trim().includes(visibleText)
-      ).length;
-
-      if (sameTextCount === 1) {
-        // Use Playwright :has-text for buttons/links with unique text
-        return `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
-      }
-
-      // If not unique, try with more specific selector combining with parent/ancestor
-      const parentClasses = element.parentElement ?
-        Array.from(element.parentElement.classList).filter(c => !/(ng-|cdk-|mat-)/.test(c)) : [];
-
-      if (parentClasses.length > 0) {
-        const sel = `${tag}:has-text("${visibleText.replace(/"/g, '\\"')}")`;
-        // isUnique knows how to handle :has-text
+  // Handle buttons with tooltip children
+  if (tag === "button" && !visibleText) {
+    // Look for child elements with ngbtooltip, title, or aria-label
+    const tooltipChild = element.querySelector('[ngbtooltip], [title], [aria-label]');
+    if (tooltipChild) {
+      const tooltipAttr = tooltipChild.getAttribute('ngbtooltip') || 
+                         tooltipChild.getAttribute('title') || 
+                         tooltipChild.getAttribute('aria-label');
+      
+      if (tooltipAttr) {
+        // Try button:has(i[ngbtooltip="..."]) - but only use it if it's UNIQUE
+        const sel = `${tag}:has(${tooltipChild.tagName.toLowerCase()}[ngbtooltip="${escape(tooltipAttr)}"])`;
         if (isUnique(sel)) return clean(sel);
-      }
-    }
-  }
-
-  // 6. Label text for form elements
-  if (tag === "input" || tag === "textarea" || tag === "select") {
-    if (element.id) {
-      const label = document.querySelector(`label[for="${element.id}"]`);
-      if (label) {
-        const labelText = textOf(label);
-        if (labelText && labelText.length <= 100) {
-          const sel = `#${escape(element.id)}`;
-          if (isUnique(sel)) return clean(sel);
+        
+        // Also try with title attribute - only if unique
+        if (tooltipChild.hasAttribute('title')) {
+          const sel2 = `${tag}:has(${tooltipChild.tagName.toLowerCase()}[title="${escape(tooltipAttr)}"])`;
+          if (isUnique(sel2)) return clean(sel2);
+        }
+        
+        // Also try with aria-label attribute - only if unique
+        if (tooltipChild.hasAttribute('aria-label')) {
+          const sel3 = `${tag}:has(${tooltipChild.tagName.toLowerCase()}[aria-label="${escape(tooltipAttr)}"])`;
+          if (isUnique(sel3)) return(sel3);
         }
       }
     }
   }
 
-  // 7. Placeholder text for inputs
-  if (element.placeholder && (tag === "input" || tag === "textarea")) {
-    const sel = `[placeholder="${escape(element.placeholder)}"]`;
+  // =========================
+  // PRIORITY 4: ARIA / ROLE (excluding internal dropdown elements)
+  // =========================
+
+  if (role === "option" && visibleText) {
+    const sel = `[role="option"]:has-text("${visibleText.replace(/"/g, '\\"')}")`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ========== PRIORITY 3: ARIA & ACCESSIBILITY ==========
-
-  // 8. Aria-label (specific accessible name)
-  const ariaLabel = element.getAttribute("aria-label");
-  if (ariaLabel && ariaLabel.length <= 100) {
-    const sel = `[aria-label="${escape(ariaLabel)}"]`;
-    if (isUnique(sel)) return clean(sel);
-  }
-
-  // 9. Explicit role attribute WITH additional specificity
-  const role = element.getAttribute("role");
-  if (role) {
-    // For buttons with role, try to combine with other attributes
-    if (role === "button") {
-      // Try role + text
-      if (visibleText && visibleText.length <= 100) {
-        const sel = `[role="button"]:has-text("${visibleText.replace(/"/g, '\\"')}")`;
-        if (isUnique(sel)) return clean(sel);
-      }
-
-      // Try role + aria-label
-      if (ariaLabel) {
-        const sel = `[role="button"][aria-label="${escape(ariaLabel)}"]`;
-        if (isUnique(sel)) return clean(sel);
-      }
-
-      // Try role + classes
-      const goodClasses = getMeaningfulClasses(element);
-      if (goodClasses.length > 0) {
-        const sel = `[role="button"].${goodClasses.map(escape).join(".")}`;
-        if (isUnique(sel)) return clean(sel);
-      }
+  // Only use role="button" selector if it's NOT a dropdown trigger
+  if (role === "button") {
+    const aria = element.getAttribute("aria-label");
+    if (aria && !aria.toLowerCase().includes('trigger') && !aria.toLowerCase().includes('dropdown')) {
+      const sel = `[role="button"][aria-label="${escape(aria)}"]`;
+      if (isUnique(sel)) return clean(sel);
     }
+  }
 
-    // Generic role selector (only if unique)
+  if (role && role !== "option" && role !== "button" && role !== "combobox") {
     const sel = `[role="${escape(role)}"]`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // 10. Implicit ARIA role (for elements without explicit role)
   const implicitRole = getImplicitRole(element);
-  if (implicitRole && !role) {
-    // Similar approach as explicit role
-    if (implicitRole === "button") {
-      if (visibleText && visibleText.length <= 100) {
-        const sel = `button:has-text("${visibleText.replace(/"/g, '\\"')}")`;
-        if (isUnique(sel)) return clean(sel);
-      }
-    }
+  if (implicitRole && !role && visibleText) {
+    const sel = `${implicitRole}:has-text("${visibleText.replace(
+      /"/g,
+      '\\"'
+    )}")`;
+    if (isUnique(sel)) return clean(sel);
   }
 
-  // ========== PRIORITY 4: CLASSES & ATTRIBUTES ==========
+  // =========================
+  // PRIORITY 5: Classes
+  // =========================
 
-  // 11. Meaningful CSS classes
   const goodClasses = getMeaningfulClasses(element);
   if (goodClasses.length) {
     const sel = `${tag}.${goodClasses.map(escape).join(".")}`;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // 12. Title attribute
-  const title = element.getAttribute("title");
-  if (title) {
-    const sel = `${tag}[title="${escape(title)}"]`;
+  // =========================
+  // PRIORITY 6: Tag-specific attributes
+  // =========================
+
+  // For custom components, try using the tag name if unique enough
+  if (tag.includes('-') || tag.startsWith('p-') || tag.startsWith('mat-') || tag.startsWith('ng-')) {
+    const sel = tag;
     if (isUnique(sel)) return clean(sel);
   }
 
-  // 13. Type attribute for inputs
-  if (tag === "input" && element.type) {
-    const sel = `input[type="${escape(element.type)}"]`;
-    const allWithType = document.querySelectorAll(sel);
-    if (allWithType.length === 1) return clean(sel);
+  // =========================
+  // PRIORITY 7: Combined
+  // =========================
+
+  const parts = [tag];
+  if (element.id && !isLikelyGeneratedId(element.id)) {
+    parts.push(`#${escape(element.id)}`);
+  }
+  if (role && role !== "combobox" && role !== "button") {
+    parts.push(`[role="${escape(role)}"]`);
   }
 
-  // ========== PRIORITY 5: STRUCTURAL SELECTORS ==========
-
-  // 14. Sibling position (nth-of-type) with parent
-  if (element.parentElement) {
-    const parentTag = element.parentElement.tagName.toLowerCase();
-    const siblings = Array.from(element.parentElement.children)
-      .filter(n => n.tagName.toLowerCase() === tag);
-
-    if (siblings.length > 1) {
-      const idx = siblings.indexOf(element) + 1;
-      const sel = `${tag}:nth-of-type(${idx})`;
-      if (isUnique(sel)) return clean(sel);
-    }
-
-    // Try with parent selector
-    if (element.parentElement.id) {
-      const sel = `#${escape(element.parentElement.id)} > ${tag}`;
-      if (isUnique(sel)) return clean(sel);
-    }
-  }
-
-  // 15. Data attributes (generic)
-  const dataAttrs = Array.from(element.attributes)
-    .filter(attr => attr.name.startsWith('data-') && !attr.name.startsWith('data-test'));
-
-  for (const attr of dataAttrs) {
-    const sel = `[${attr.name}="${escape(attr.value)}"]`;
+  if (parts.length > 1) {
+    const sel = parts.join("");
     if (isUnique(sel)) return clean(sel);
   }
 
-  // ========== FALLBACK: COMBINED SELECTORS ==========
+  // =========================
+  // FINAL FALLBACK: XPATH (FIXED)
+  // =========================
 
-  // 16. Try combining multiple attributes
-  const attributes = [];
-  if (tag) attributes.push(tag);
-  if (element.id) attributes.push(`#${escape(element.id)}`);
+  let xpathTarget = element;
 
-  // Add classes if they exist
-  const allClasses = Array.from(element.classList || [])
-    .filter(c => !/(ng-|cdk-|mat-)/.test(c));
-
-  if (allClasses.length > 0) {
-    attributes.push(`.${allClasses.map(escape).join('.')}`);
+  // 🔑 Fix for dropdowns / comboboxes
+  if (xpathTarget.getAttribute?.("role") === "combobox") {
+    const container = xpathTarget.closest("p-dropdown, mat-select, ng-select, [role='combobox']");
+    if (container) {
+      xpathTarget = container;
+    }
   }
 
-  // Add other attributes
-  if (element.type) attributes.push(`[type="${escape(element.type)}"]`);
-  if (element.name) attributes.push(`[name="${escape(element.name)}"]`);
-  if (role) attributes.push(`[role="${escape(role)}"]`);
+  // 🔑 Fix for SVG / icon clicks
+  if (xpathTarget instanceof SVGElement) {
+    const clickableAncestor = xpathTarget.closest(
+      'button, a[href], [role="button"], p-dropdown, mat-select, ng-select, [tabindex]:not([tabindex="-1"])'
+    );
+    if (clickableAncestor) xpathTarget = clickableAncestor;
+  }
 
-  const combinedSel = attributes.join('');
-  if (combinedSel && isUnique(combinedSel)) return clean(combinedSel);
-
-  // ========== FINAL FALLBACK: XPATH ==========
-
-  // 17. XPath as last resort
-  return `xpath=${getXPath(element)}`;
+  return `xpath=${getXPath(xpathTarget)}`;
 
   function getXPath(el) {
     if (el === document.body) return "/html/body";
     if (!el || !el.parentNode) return "";
 
-    const ix = (sib, name) =>
-      Array.from(sib.parentNode.children)
-        .filter(n => n.tagName === name).indexOf(sib) + 1;
-
-    const parentXPath = getXPath(el.parentNode);
-    if (parentXPath === "") {
-      return `/${el.tagName.toLowerCase()}[${ix(el, el.tagName)}]`;
-    }
-
-    return (
-      parentXPath +
-      "/" +
-      el.tagName.toLowerCase() +
-      "[" +
-      ix(el, el.tagName) +
-      "]"
+    const siblings = Array.from(el.parentNode.children).filter(
+      (n) => n.tagName === el.tagName
     );
+    const idx = siblings.indexOf(el) + 1;
+
+    return `${getXPath(el.parentNode)}/${el.tagName.toLowerCase()}[${idx}]`;
   }
 }
 

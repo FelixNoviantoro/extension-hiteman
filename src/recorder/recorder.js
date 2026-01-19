@@ -35,6 +35,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const url = urlParams.get('url');
   if (url) {
     document.getElementById('urlInput').value = url;
+    
+    // Auto-start after short delay (no button click needed)
+      startRecording();
   }
 
   // Clear storage saat recorder.html dibuka
