@@ -2,9 +2,6 @@
   "manifest_version": 3,
   "name": "hiTeman Automation Testing Extension",
   "version": "2.0",
-
-  "key": "MD8BIjANCgYJKj9IPz8NCgEBAQUAAz8BDwAwPwENCgI/AQEAP3kZOlQ/Pz8CNDs/Pz9pPz9RPxFWPz8/Pz8/IB4/Oz8/Px1uL3kEAjI/LGo/Pz8/P04/P0J7FUY/Pz8/Pz91P0M/Wz8/Pzw/Pz9QDwA/VT8YAD8/bD8/Kzk/P08/WD9FflJYJVZNPyI/P0M/Kg4/WWEsP14/QSA/PzEfam4/MD9SP00/PwFZED9ecDw/BwY/Pz94Pz8XTD8/Lj8YDgVDD1Q/Pz8+PwU/Pz8/Pz8/Pz98PxVhPw0KPwM/WUlDPz8UPyg/MRMgPxw/Pz9cfHU/Pz8/Aj9HPzo/GEoFPy52Ij8/Nz8mPwI/Pyo/FD8/PxQ/Pz8/fj8/Lj8/P2Y/UD84Pz8CAwEAAQ0K",
-
   "permissions": [
     "activeTab",
     "scripting",
@@ -17,20 +14,29 @@
     "declarativeNetRequestWithHostAccess",
     "debugger"
   ],
+
+  "key": "MD8BIjANCgYJKj9IPz8NCgEBAQUAAz8BDwAwPwENCgI/AQEAP3kZOlQ/Pz8CNDs/Pz9pPz9RPxFWPz8/Pz8/IB4/Oz8/Px1uL3kEAjI/LGo/Pz8/P04/P0J7FUY/Pz8/Pz91P0M/Wz8/Pzw/Pz9QDwA/VT8YAD8/bD8/Kzk/P08/WD9FflJYJVZNPyI/P0M/Kg4/WWEsP14/QSA/PzEfam4/MD9SP00/PwFZED9ecDw/BwY/Pz94Pz8XTD8/Lj8YDgVDD1Q/Pz8+PwU/Pz8/Pz8/Pz98PxVhPw0KPwM/WUlDPz8UPyg/MRMgPxw/Pz9cfHU/Pz8/Aj9HPzo/GEoFPy52Ij8/Nz8mPwI/Pyo/FD8/PxQ/Pz8/fj8/Lj8/P2Y/UD84Pz8CAwEAAQ0K",
+  
   "host_permissions": [
     "<all_urls>"
   ],
   "action": {
-    "default_popup": ""
+    "default_title": "hiTeman Automation"
   },
   "background": {
     "service_worker": "src/background/background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "css": ["src/content/inject.css"],
-      "js": ["src/content/content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "css": [
+        "src/content/inject.css"
+      ],
+      "js": [
+        "src/content/content.js"
+      ],
       "run_at": "document_start"
     }
   ],
@@ -44,10 +50,12 @@
         "src/helper/api_patcher.js",
         "src/helper/api_injector.js"
       ],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
-  "declarative_net_request": { 
+  "declarative_net_request": {
     "rule_resources": [
       {
         "id": "csp_rules",
@@ -61,6 +69,8 @@
     "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-inline' 'unsafe-eval';"
   },
   "externally_connectable": {
-    "matches": ["*://*/*"]
+    "matches": [
+      "*://*/*"
+    ]
   }
 }

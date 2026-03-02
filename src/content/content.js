@@ -506,6 +506,7 @@ function startRecording() {
   document.addEventListener("blur", handleBlur, true);
   document.addEventListener("mouseover", handleHover, true);
   document.addEventListener("mouseout", handleMouseOut, true);
+  document.addEventListener("mousedown", handleMouseDown, true);
   startObserver();
   startSyncInterval();
 }
@@ -566,19 +567,73 @@ function safeCleanup() {
 
 async function handleClick(e) {
   if (!isRecording) return;
-  const element = e.target;
+
+  console.log("---- CLICK ----");
+  console.log("Target:", e.target);
+  console.log("Tag:", e.target.tagName);
+  console.log("Role:", e.target.getAttribute?.("role"));
+
+  if (e.__handledByRecorder) {
+    console.log("Click ignored (already handled in mousedown).");
+    return;
+  }
+
+  console.log("Processing normal click flow...");
 
   const isShiftClick = e.shiftKey;
+
+  // Always resolve the real clickable element
+  const optionElement = e.target.closest('[role="option"]');
+  const element = optionElement || e.target;
+
   let data = { command: "click", value: "" };
 
-  if (element.closest(".recorder-controls") ||
+  if (
+    element.closest(".recorder-controls") ||
     element.classList.contains("recorder-hover-overlay") ||
-    element.classList.contains("recorder-tooltip")) return;
+    element.classList.contains("recorder-tooltip")
+  ) return;
 
   showOverlay(element, "click");
 
-  const savePromise = recordAction("click", element, data);
+  let savePromise;
 
+  // 🔥 SPECIAL HANDLING FOR DROPDOWN OPTIONS (Select2, etc.)
+  if (optionElement) {
+    const visibleText = optionElement.textContent
+      ?.trim()
+      .replace(/\s+/g, " ");
+
+    if (!visibleText) return;
+
+    const safeText = visibleText.replace(/"/g, '\\"');
+
+    const selector = `[role="option"]:has-text("${safeText}")`;
+
+    const action = {
+      action: "click",
+      selector: selector,
+      _metadata: {
+        timestamp: new Date().toISOString(),
+        pageUrl: window.location.href,
+        originalCommand: "click",
+        elementInfo: {
+          tagName: optionElement.tagName,
+          text: visibleText
+        }
+      }
+    };
+
+    recordedData.push(action);
+    chrome.storage.local.set({ recordedData });
+
+    savePromise = Promise.resolve(); // keep shift+click logic intact
+  } else {
+    // Normal click flow
+    savePromise = recordAction("click", element, data);
+  }
+
+  // ✅ Preserve Shift+Click API capture logic
   if (isShiftClick && savePromise) {
     console.log('Shift+Click detected - starting API capture');
     await savePromise;
@@ -587,11 +642,9 @@ async function handleClick(e) {
     pendingApiAssertionIndex = actionIndex;
 
     try {
-      // We don't need to send tabId, the background script will get it from sender.tab.id
       const response = await chrome.runtime.sendMessage({
         action: 'START_API_CAPTURE',
         actionIndex: actionIndex
-        // Don't send tabId - background will get it from the message sender
       });
 
       console.log('API capture started:', response);
@@ -600,6 +653,53 @@ async function handleClick(e) {
       console.error('Failed to start API capture:', error);
     }
   }
+}
+
+function handleMouseDown(e) {
+  if (!isRecording) return;
+
+  console.log("---- MOUSEDOWN ----");
+  console.log("Target:", e.target);
+  console.log("Tag:", e.target.tagName);
+  console.log("Role:", e.target.getAttribute?.("role"));
+
+  const option = e.target.closest('[role="option"]');
+
+  if (!option) {
+    console.log("No role=option found in ancestry.");
+    return;
+  }
+
+  console.log("role=option detected:", option);
+  console.log("Option text:", option.textContent);
+
+  const text = option.textContent?.trim().replace(/\s+/g, " ");
+  if (!text) {
+    console.log("Option has empty text. Aborting.");
+    return;
+  }
+
+  const safeText = text.replace(/"/g, '\\"');
+  const selector = `[role="option"]:has-text("${safeText}")`;
+
+  console.log("Generated selector:", selector);
+
+  const action = {
+    action: "click",
+    selector,
+    _metadata: {
+      timestamp: new Date().toISOString(),
+      pageUrl: window.location.href
+    }
+  };
+
+  recordedData.push(action);
+  chrome.storage.local.set({ recordedData });
+
+  console.log("✅ Option action pushed.");
+  console.log("Total steps:", recordedData.length);
+
+  e.__handledByRecorder = true;
 }
 
 function handleHover(e) {
@@ -641,12 +741,23 @@ function handleMouseOut(e) {
 
 function handleChange(e) {
   if (!isRecording) return;
+
   const element = e.target;
 
+  // =========================
+  // SELECT
+  // =========================
   if (element.tagName === "SELECT") {
-    recordAction("select", element, { command: "selectOption", value: element.value });
+    recordAction("select", element, {
+      command: "selectOption",
+      value: element.value
+    });
+    return;
   }
 
+  // =========================
+  // FILE INPUT
+  // =========================
   if (element.tagName === "INPUT" && element.type === "file") {
     const files = Array.from(element.files);
 
@@ -656,22 +767,42 @@ function handleChange(e) {
         value: ""
       });
     } else {
-      // Get extensions only
       const extensions = files.map(file => {
         const name = file.name;
-        if (name.includes('.')) {
-          return name.split('.').pop().toLowerCase();
+        if (name.includes(".")) {
+          return name.split(".").pop().toLowerCase();
         }
-        return 'file'; // fallback for files without extension
+        return "file";
       });
-
-      // Join extensions (for single file, just the extension; for multiple, comma-separated)
-      const extensionString = extensions.join(', ');
 
       recordAction("upload", element, {
         command: "setInputFiles",
-        value: extensionString
+        value: extensions.join(", ")
       });
+    }
+    return;
+  }
+
+  // =========================
+  // DATE / TIME INPUTS (NEW)
+  // =========================
+  if (element.tagName === "INPUT") {
+    const type = (element.type || "").toLowerCase();
+
+    const dateLikeTypes = new Set([
+      "date",
+      "time",
+      "datetime-local",
+      "month",
+      "week"
+    ]);
+
+    if (dateLikeTypes.has(type)) {
+      recordAction("fill", element, {
+        command: "fill",
+        value: element.value
+      });
+      return;
     }
   }
 }
@@ -701,10 +832,7 @@ function handleInput(e) {
     return;
   }
 
-  const type = (element.type || "").toLowerCase();
-  const textLikeInputTypes = new Set(["text", "search", "email", "password", "tel", "url", "number"]);
-
-  if (element.tagName === "TEXTAREA" || textLikeInputTypes.has(type)) {
+  if (element.tagName === "TEXTAREA" || isTextLikeInput(element)) {
     const key = getUniqueElementKey(element);
 
     // Use setTimeout to get value AFTER oninput handler runs
@@ -720,12 +848,38 @@ function handleInput(e) {
   }
 }
 
+function isTextLikeInput(element) {
+  if (!element) return false;
+
+  if (element.tagName === "TEXTAREA") return true;
+
+  if (element.tagName !== "INPUT") return false;
+
+  const type = (element.type || "").toLowerCase();
+
+  return [
+    "text",
+    "search",
+    "email",
+    "password",
+    "tel",
+    "url",
+    "number",
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week"
+  ].includes(type);
+}
+
 
 function handleBlur(e) {
   if (!isRecording) return;
   const element = e.target;
 
   console.log('🔵 BLUR EVENT FIRED');
+  console.log('============ NEW TESTING UPDATE ==============');
   console.log('  Element:', {
     tagName: element.tagName,
     type: element.type,
@@ -1174,6 +1328,8 @@ function getBestPlaywrightSelector(element) {
     if (interactiveChild) element = interactiveChild;
   }
 
+  element = normalizeTarget(element);
+
   // =========================
   // DROPDOWN NORMALIZATION (CRITICAL FIX)
   // =========================
@@ -1427,6 +1583,29 @@ function getBestPlaywrightSelector(element) {
   }
 }
 
+const normalizeTarget = (el) => {
+  if (!el) return el;
+
+  // Promote searchbox → combobox
+  if (el.getAttribute?.("role") === "searchbox") {
+    const cb = el.closest('[role="combobox"]');
+    if (cb) return cb;
+  }
+
+  // Promote internal dropdown input → combobox
+  const dropdownAncestor = el.closest(
+    '[role="combobox"], p-dropdown, mat-select, ng-select'
+  );
+  if (
+    dropdownAncestor &&
+    el !== dropdownAncestor &&
+    el.tagName.toLowerCase() === "input"
+  ) {
+    return dropdownAncestor;
+  }
+
+  return el;
+};
 
 function getUniqueElementKey(element) {
   // Use formcontrolname if available (most reliable for Angular)
