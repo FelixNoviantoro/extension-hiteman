@@ -50,6 +50,15 @@ function addStyles() {
 
 chrome.storage.local.get(["isRecording", "recordedData"], (result) => {
   if (result.isRecording) {
+    // ✅ Don't activate on login/auth pages
+    const isAuthPage = window.location.pathname.includes('/login')
+      || window.location.pathname.includes('/auth')
+      || window.location.pathname.includes('/signin');
+    if (isAuthPage) {
+      console.log('[Extension] Skipping recording activation on auth page');
+      return;
+    }
+
     isRecording = true;
     recordedData = result.recordedData || [];
     isTargetPage = true;
@@ -568,25 +577,14 @@ function safeCleanup() {
 async function handleClick(e) {
   if (!isRecording) return;
 
-  console.log("---- CLICK ----");
-  console.log("Target:", e.target);
-  console.log("Tag:", e.target.tagName);
-  console.log("Role:", e.target.getAttribute?.("role"));
-
   if (e.__handledByRecorder) {
     console.log("Click ignored (already handled in mousedown).");
     return;
   }
 
-  console.log("Processing normal click flow...");
-
   const isShiftClick = e.shiftKey;
-
-  // Always resolve the real clickable element
   const optionElement = e.target.closest('[role="option"]');
   const element = optionElement || e.target;
-
-  let data = { command: "click", value: "" };
 
   if (
     element.closest(".recorder-controls") ||
@@ -594,22 +592,54 @@ async function handleClick(e) {
     element.classList.contains("recorder-tooltip")
   ) return;
 
-  showOverlay(element, "click");
+  if (isShiftClick) {
+    // ✅ Stop the shift+click from reaching the page entirely
+    e.stopImmediatePropagation();
+    e.preventDefault();
 
+    // ✅ Do all async work first, without blocking the form submit
+    const savePromise = optionElement ? Promise.resolve() : recordAction("click", element, { command: "click", value: "" });
+    await savePromise;
+
+    const actionIndex = recordedData.length - 1;
+    pendingApiAssertionIndex = actionIndex;
+
+    // Start API capture in background
+    chrome.runtime.sendMessage({
+      action: 'START_API_CAPTURE',
+      actionIndex: actionIndex
+    }).then(response => {
+      console.log('API capture started:', response);
+      showApiCaptureNotification();
+    }).catch(error => {
+      console.error('Failed to start API capture:', error);
+    });
+
+    // ✅ Re-dispatch the click WITHOUT shift key so the form submits normally
+    const newClick = new MouseEvent('click', {
+      bubbles: e.bubbles,
+      cancelable: e.cancelable,
+      view: e.view,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      shiftKey: false,  // ← strip the shift key
+      ctrlKey: e.ctrlKey,
+      altKey: e.altKey,
+    });
+    newClick.__handledByRecorder = true;
+    element.dispatchEvent(newClick);
+    return;
+  }
+
+  // Normal (non-shift) click flow — unchanged
+  showOverlay(element, "click");
   let savePromise;
 
-  // 🔥 SPECIAL HANDLING FOR DROPDOWN OPTIONS (Select2, etc.)
   if (optionElement) {
-    const visibleText = optionElement.textContent
-      ?.trim()
-      .replace(/\s+/g, " ");
-
+    const visibleText = optionElement.textContent?.trim().replace(/\s+/g, " ");
     if (!visibleText) return;
-
     const safeText = visibleText.replace(/"/g, '\\"');
-
     const selector = `[role="option"]:has-text("${safeText}")`;
-
     const action = {
       action: "click",
       selector: selector,
@@ -617,41 +647,14 @@ async function handleClick(e) {
         timestamp: new Date().toISOString(),
         pageUrl: window.location.href,
         originalCommand: "click",
-        elementInfo: {
-          tagName: optionElement.tagName,
-          text: visibleText
-        }
+        elementInfo: { tagName: optionElement.tagName, text: visibleText }
       }
     };
-
     recordedData.push(action);
     chrome.storage.local.set({ recordedData });
-
-    savePromise = Promise.resolve(); // keep shift+click logic intact
+    savePromise = Promise.resolve();
   } else {
-    // Normal click flow
-    savePromise = recordAction("click", element, data);
-  }
-
-  // ✅ Preserve Shift+Click API capture logic
-  if (isShiftClick && savePromise) {
-    console.log('Shift+Click detected - starting API capture');
-    await savePromise;
-
-    const actionIndex = recordedData.length - 1;
-    pendingApiAssertionIndex = actionIndex;
-
-    try {
-      const response = await chrome.runtime.sendMessage({
-        action: 'START_API_CAPTURE',
-        actionIndex: actionIndex
-      });
-
-      console.log('API capture started:', response);
-      showApiCaptureNotification();
-    } catch (error) {
-      console.error('Failed to start API capture:', error);
-    }
+    savePromise = recordAction("click", element, { command: "click", value: "" });
   }
 }
 
@@ -741,8 +744,26 @@ function handleMouseOut(e) {
 
 function handleChange(e) {
   if (!isRecording) return;
-
   const element = e.target;
+
+  // ============================================
+  // CODEMIRROR HANDLING
+  // ============================================
+  if (isCodeMirrorEditor(element)) {
+    console.log('🔵 CHANGE event on CodeMirror - capturing value');
+    const value = getCodeMirrorValue(element);
+    const cmEditor = getCodeMirrorEditor(element);
+
+    recordAction("type", cmEditor, {
+      command: "fill",
+      value: value,
+      _metadata: {
+        isCodeMirror: true,
+        editorType: 'codemirror'
+      }
+    });
+    return;
+  }
 
   // =========================
   // SELECT
@@ -760,7 +781,6 @@ function handleChange(e) {
   // =========================
   if (element.tagName === "INPUT" && element.type === "file") {
     const files = Array.from(element.files);
-
     if (files.length === 0) {
       recordAction("upload", element, {
         command: "setInputFiles",
@@ -774,7 +794,6 @@ function handleChange(e) {
         }
         return "file";
       });
-
       recordAction("upload", element, {
         command: "setInputFiles",
         value: extensions.join(", ")
@@ -784,11 +803,10 @@ function handleChange(e) {
   }
 
   // =========================
-  // DATE / TIME INPUTS (NEW)
+  // DATE / TIME INPUTS
   // =========================
   if (element.tagName === "INPUT") {
     const type = (element.type || "").toLowerCase();
-
     const dateLikeTypes = new Set([
       "date",
       "time",
@@ -807,6 +825,44 @@ function handleChange(e) {
   }
 }
 
+function isCodeMirrorEditor(element) {
+  return element.classList.contains('cm-content') ||
+    element.classList.contains('cm-line') ||
+    element.closest('.cm-editor') !== null;
+}
+
+function getCodeMirrorValue(element) {
+  const editor = element.closest('.cm-editor');
+  if (!editor) return '';
+
+  // Try to get the EditorView instance directly
+  const cmContent = editor.querySelector('.cm-content');
+  if (cmContent && cmContent.cmView && cmContent.cmView.state) {
+    return cmContent.cmView.state.doc.toString();
+  }
+
+  // Fallback: get text content excluding placeholders
+  const lines = editor.querySelectorAll('.cm-line');
+  const text = Array.from(lines)
+    .map(line => {
+      // Clone and remove placeholder spans and widget buffers
+      const clone = line.cloneNode(true);
+      clone.querySelectorAll('.cm-placeholder, .cm-widgetBuffer').forEach(el => el.remove());
+      return clone.textContent;
+    })
+    .join('\n')
+    .trim();
+
+  return text;
+}
+
+function getCodeMirrorEditor(element) {
+  if (element.classList.contains('cm-content')) {
+    return element;
+  }
+  return element.closest('.cm-editor')?.querySelector('.cm-content');
+}
+
 function handleInput(e) {
   if (!isRecording) return;
   const element = e.target;
@@ -817,16 +873,64 @@ function handleInput(e) {
     type: element.type,
     id: element.id,
     name: element.name,
-    className: element.className
+    className: element.className,
+    contentEditable: element.contentEditable,
+    isCodeMirror: isCodeMirrorEditor(element)
   });
-  console.log('  Value BEFORE:', element.value);
-  console.log('  Event type:', e.type);
-  console.log('  Timestamp:', Date.now());
 
-  if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") {
-    console.log('  ⚠️ Not an input/textarea, skipping');
+  // ============================================
+  // CODEMIRROR HANDLING
+  // ============================================
+  if (isCodeMirrorEditor(element)) {
+    console.log('  ✅ CodeMirror editor detected');
+    const key = getUniqueElementKey(element);
+
+    setTimeout(() => {
+      const value = getCodeMirrorValue(element);
+      console.log('🟢 CodeMirror value captured:', value.substring(0, 50) + (value.length > 50 ? '...' : ''));
+
+      inputBuffer[key] = {
+        element,
+        value: value,
+        timestamp: new Date(),
+        selector: getBestPlaywrightSelector(getCodeMirrorEditor(element)),
+        isCodeMirror: true,
+        editorType: 'codemirror'
+      };
+    }, 100); // Slightly longer delay for CodeMirror to update
     return;
   }
+
+  // ============================================
+  // CONTENTEDITABLE HANDLING (non-CodeMirror)
+  // ============================================
+  if (element.contentEditable === 'true' && !isCodeMirrorEditor(element)) {
+    console.log('  ✅ ContentEditable element detected');
+    const key = getUniqueElementKey(element);
+
+    setTimeout(() => {
+      const value = element.innerText || element.textContent || '';
+      console.log('🟢 ContentEditable value captured:', value.substring(0, 50) + (value.length > 50 ? '...' : ''));
+
+      inputBuffer[key] = {
+        element,
+        value: value,
+        timestamp: new Date(),
+        selector: getBestPlaywrightSelector(element),
+        isContentEditable: true
+      };
+    }, 10);
+    return;
+  }
+
+  // ============================================
+  // STANDARD INPUT/TEXTAREA HANDLING
+  // ============================================
+  if (element.tagName !== "INPUT" && element.tagName !== "TEXTAREA") {
+    console.log('  ⚠️ Not an input/textarea/contenteditable, skipping');
+    return;
+  }
+
   if (element.tagName === "INPUT" && element.type === "file") {
     console.log('  ⚠️ File input, skipping');
     return;
@@ -835,7 +939,6 @@ function handleInput(e) {
   if (element.tagName === "TEXTAREA" || isTextLikeInput(element)) {
     const key = getUniqueElementKey(element);
 
-    // Use setTimeout to get value AFTER oninput handler runs
     setTimeout(() => {
       console.log('🟢 Delayed capture - Value:', element.value);
       inputBuffer[key] = {
@@ -844,7 +947,7 @@ function handleInput(e) {
         timestamp: new Date(),
         selector: getBestPlaywrightSelector(element)
       };
-    }, 10); // Small delay
+    }, 10);
   }
 }
 
@@ -877,7 +980,6 @@ function isTextLikeInput(element) {
 function handleBlur(e) {
   if (!isRecording) return;
   const element = e.target;
-
   console.log('🔵 BLUR EVENT FIRED');
   console.log('============ NEW TESTING UPDATE ==============');
   console.log('  Element:', {
@@ -889,11 +991,9 @@ function handleBlur(e) {
     className: element.className
   });
   console.log('  Current value:', element.value);
-
   const bufferKey = getUniqueElementKey(element);
   console.log('  🔑 Looking for buffer with key:', bufferKey);
   console.log('  📦 Buffer contents:', inputBuffer[bufferKey]);
-
   const tag = element.tagName;
   const textLikeInputTypes = new Set(['text', 'search', 'email', 'password', 'tel', 'url', 'number']);
 
@@ -902,11 +1002,87 @@ function handleBlur(e) {
     return;
   }
 
+  // ============================================
+  // CODEMIRROR HANDLING — must be BEFORE the standard input check
+  // ============================================
+  if (isCodeMirrorEditor(element)) {
+    console.log('  ✅ CodeMirror blur detected');
+    const buffered = inputBuffer[bufferKey];
+
+    if (buffered && buffered.value !== undefined && buffered.value !== '') {
+      console.log('  📝 Recording CodeMirror value from buffer:', buffered.value.substring(0, 50));
+
+      const action = {
+        action: 'fill',
+        selector: buffered.selector || getBestPlaywrightSelector(element),
+        value: buffered.value,
+        _metadata: {
+          timestamp: new Date().toISOString(),
+          pageUrl: window.location.href,
+          originalCommand: 'fill',
+          isCodeMirror: true,
+          editorType: 'codemirror',
+          elementInfo: {
+            tagName: element.tagName,
+            id: element.id,
+            className: element.className,
+          }
+        }
+      };
+
+      console.log('  💾 Recording CodeMirror action:', action);
+      recordedData.push(action);
+
+      if (isRecording) {
+        chrome.storage.local.set({ recordedData: recordedData });
+        console.log('  ✅ Saved to storage');
+      }
+
+      delete inputBuffer[bufferKey];
+      console.log('  🗑️ Buffer cleared');
+    } else {
+      // Buffer missing — read directly from editor as fallback
+      const fallbackValue = getCodeMirrorValue(element);
+      console.log('  ⚠️ No buffer found, fallback value:', fallbackValue);
+
+      if (fallbackValue) {
+        const action = {
+          action: 'fill',
+          selector: getBestPlaywrightSelector(element),
+          value: fallbackValue,
+          _metadata: {
+            timestamp: new Date().toISOString(),
+            pageUrl: window.location.href,
+            originalCommand: 'fill',
+            isCodeMirror: true,
+            editorType: 'codemirror',
+            elementInfo: {
+              tagName: element.tagName,
+              id: element.id,
+              className: element.className,
+            }
+          }
+        };
+
+        console.log('  💾 Recording CodeMirror fallback action:', action);
+        recordedData.push(action);
+
+        if (isRecording) {
+          chrome.storage.local.set({ recordedData: recordedData });
+          console.log('  ✅ Saved to storage');
+        }
+      }
+    }
+    return; // Always return early — never fall through to standard handler
+  }
+
+  // ============================================
+  // STANDARD INPUT / TEXTAREA — existing logic unchanged
+  // ============================================
   if (inputBuffer[bufferKey] && (tag === 'TEXTAREA' || (tag === 'INPUT' && textLikeInputTypes.has((element.type || '').toLowerCase())))) {
     console.log('  ✅ Buffer found, processing...');
     console.log('  📝 Buffer value:', inputBuffer[bufferKey].value);
     console.log('  📝 Current element value:', element.value);
-
     let selectorToUse = null;
     try {
       const lastAction = recordedData.length > 0 ? recordedData[recordedData.length - 1] : null;
@@ -918,19 +1094,16 @@ function handleBlur(e) {
     } catch (err) {
       console.log('  ❌ Error checking last action:', err.message);
     }
-
     if (!selectorToUse) {
       selectorToUse = getBestPlaywrightSelector(element);
       console.log('  🔍 Generated new selector:', selectorToUse);
     }
-
     const selector = selectorToUse;
     let action = {
       action: 'fill',
       selector: selector,
       value: element.value,
     };
-
     action._metadata = {
       timestamp: new Date().toISOString(),
       pageUrl: window.location.href,
@@ -942,15 +1115,12 @@ function handleBlur(e) {
         text: element.textContent?.trim()
       }
     };
-
     console.log('  💾 Recording action:', action);
     recordedData.push(action);
-
     if (isRecording) {
       chrome.storage.local.set({ recordedData: recordedData });
       console.log('  ✅ Saved to storage');
     }
-
     delete inputBuffer[bufferKey];
     console.log('  🗑️ Buffer cleared');
   } else {
@@ -961,18 +1131,29 @@ function handleBlur(e) {
 }
 
 function handleKeyup(e) {
+  if (!isRecording) return;
+  const element = e.target;
+
   console.log('🔵 KEYUP EVENT FIRED');
   console.log('  Element:', {
-    tagName: e.target.tagName,
-    type: e.target.type,
-    id: e.target.id,
-    name: e.target.name,
-    value: e.target.value
+    tagName: element.tagName,
+    type: element.type,
+    id: element.id,
+    name: element.name,
+    value: element.value,
+    contentEditable: element.contentEditable,
+    isCodeMirror: isCodeMirrorEditor(element)
   });
   console.log('  Key:', e.key);
   console.log('  Key code:', e.keyCode);
 
-  // Then call your existing handleInput
+  // Handle Enter key specially for CodeMirror
+  if (e.key === 'Enter' && isCodeMirrorEditor(element)) {
+    console.log('  ⚡ Enter key in CodeMirror - may trigger submission');
+    // Don't return here, let handleInput process it
+  }
+
+  // Call handleInput to process the input
   handleInput(e);
 }
 
@@ -1228,22 +1409,22 @@ function getBestPlaywrightSelector(element) {
   const textOf = (el) => {
     // Only get text content that's directly in the element, not from attributes
     const text = el.textContent?.trim().replace(/\s+/g, " ") || "";
-    
+
     // Check if this text looks like it might be from a tooltip attribute
     // by comparing with tooltip attributes of child elements
     const hasTooltipChild = el.querySelector('[ngbtooltip], [title], [aria-label]');
     if (hasTooltipChild) {
       // Get tooltip text from child elements
-      const tooltipText = hasTooltipChild.getAttribute('ngbtooltip') || 
-                         hasTooltipChild.getAttribute('title') || 
-                         hasTooltipChild.getAttribute('aria-label') || "";
-      
+      const tooltipText = hasTooltipChild.getAttribute('ngbtooltip') ||
+        hasTooltipChild.getAttribute('title') ||
+        hasTooltipChild.getAttribute('aria-label') || "";
+
       // If the element's text content matches or contains the tooltip text, return empty
       if (tooltipText && text.includes(tooltipText)) {
         return "";
       }
     }
-    
+
     return text;
   };
 
@@ -1329,6 +1510,31 @@ function getBestPlaywrightSelector(element) {
   }
 
   element = normalizeTarget(element);
+
+  if (element.hasAttribute("contenteditable")) {
+    const role = element.getAttribute("role");
+    const placeholder =
+      element.getAttribute("aria-placeholder") ||
+      element.getAttribute("placeholder");
+
+    if (placeholder) {
+      if (isUnique(`[aria-placeholder="${escape(placeholder)}"]`)) {
+        return clean(`[aria-placeholder="${escape(placeholder)}"]`);
+      }
+
+      if (isUnique(`[placeholder="${escape(placeholder)}"]`)) {
+        return clean(`[placeholder="${escape(placeholder)}"]`);
+      }
+    }
+
+    if (role === "textbox") {
+      const sel = `[role="textbox"][contenteditable="true"]`;
+      if (isUnique(sel)) return clean(sel);
+    }
+
+    const sel = `[contenteditable="true"]`;
+    if (isUnique(sel)) return clean(sel);
+  }
 
   // =========================
   // DROPDOWN NORMALIZATION (CRITICAL FIX)
@@ -1453,25 +1659,25 @@ function getBestPlaywrightSelector(element) {
     // Look for child elements with ngbtooltip, title, or aria-label
     const tooltipChild = element.querySelector('[ngbtooltip], [title], [aria-label]');
     if (tooltipChild) {
-      const tooltipAttr = tooltipChild.getAttribute('ngbtooltip') || 
-                         tooltipChild.getAttribute('title') || 
-                         tooltipChild.getAttribute('aria-label');
-      
+      const tooltipAttr = tooltipChild.getAttribute('ngbtooltip') ||
+        tooltipChild.getAttribute('title') ||
+        tooltipChild.getAttribute('aria-label');
+
       if (tooltipAttr) {
         // Try button:has(i[ngbtooltip="..."]) - but only use it if it's UNIQUE
         const sel = `${tag}:has(${tooltipChild.tagName.toLowerCase()}[ngbtooltip="${escape(tooltipAttr)}"])`;
         if (isUnique(sel)) return clean(sel);
-        
+
         // Also try with title attribute - only if unique
         if (tooltipChild.hasAttribute('title')) {
           const sel2 = `${tag}:has(${tooltipChild.tagName.toLowerCase()}[title="${escape(tooltipAttr)}"])`;
           if (isUnique(sel2)) return clean(sel2);
         }
-        
+
         // Also try with aria-label attribute - only if unique
         if (tooltipChild.hasAttribute('aria-label')) {
           const sel3 = `${tag}:has(${tooltipChild.tagName.toLowerCase()}[aria-label="${escape(tooltipAttr)}"])`;
-          if (isUnique(sel3)) return(sel3);
+          if (isUnique(sel3)) return (sel3);
         }
       }
     }
